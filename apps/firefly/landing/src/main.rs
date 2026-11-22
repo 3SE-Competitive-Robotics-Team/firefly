@@ -28,11 +28,18 @@ fn invalid(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::InvalidArgument, message).with_operation("landing.input")
 }
 
-fn external(operation: &'static str, error: impl std::fmt::Display) -> Error {
-    Error::new(ErrorKind::Internal, error.to_string()).with_operation(operation)
+fn external(
+    operation: &'static str,
+    error: impl std::error::Error + Send + Sync + 'static,
+) -> Error {
+    Error::caused_by(ErrorKind::Internal, operation, error)
 }
 
-fn main() -> Result<()> {
+fn main() -> std::process::ExitCode {
+    firefly_error::report("landing", run_app())
+}
+
+fn run_app() -> firefly_error::Result<()> {
     let args = Arguments::parse();
     let path = args
         .config

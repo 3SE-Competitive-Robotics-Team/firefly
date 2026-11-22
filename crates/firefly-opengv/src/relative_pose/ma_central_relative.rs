@@ -18,11 +18,11 @@ impl<'a> MaCentralRelative<'a> {
         bearing_vectors2: &'a [f64],
         number_bearing_vectors1: usize,
         number_bearing_vectors2: usize,
-    ) -> Result<Self, String> {
+    ) -> firefly_error::Result<Self> {
         if bearing_vectors1.len() / 3 < number_bearing_vectors1
             || bearing_vectors2.len() / 3 < number_bearing_vectors2
         {
-            return Err("adapter storage shape violates correspondence bounds".into());
+            return Err(crate::invalid_correspondences());
         }
         Ok(Self {
             bearing_vectors1,

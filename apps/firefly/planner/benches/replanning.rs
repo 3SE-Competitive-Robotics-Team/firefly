@@ -17,7 +17,11 @@ struct Arguments {
     updates: bool,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::process::ExitCode {
+    firefly_error::report("replanning", run_app())
+}
+
+fn run_app() -> firefly_error::Result<()> {
     let args = Arguments::parse();
     if !args.bench {
         return Ok(());
@@ -46,12 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[allow(clippy::too_many_lines)]
-fn run(
-    deferred: bool,
-    obstacle: bool,
-    round: usize,
-    updates: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn run(deferred: bool, obstacle: bool, round: usize, updates: bool) -> firefly_error::Result<()> {
     let mut map = GridMapBuilder::new(0.1, [160, 160, 80]).build()?;
     if obstacle {
         for x in 39..42 {

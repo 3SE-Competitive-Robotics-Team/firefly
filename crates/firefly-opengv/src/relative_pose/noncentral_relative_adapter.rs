@@ -22,7 +22,7 @@ impl<'a> NoncentralRelativeAdapter<'a> {
         cam_correspondences2: &'a [usize],
         cam_offsets: &'a [Vector3<f64>],
         cam_rotations: &'a [Matrix3<f64>],
-    ) -> Result<Self, String> {
+    ) -> firefly_error::Result<Self> {
         if bearing_vectors1.len() != bearing_vectors2.len()
             || cam_correspondences1.len() != bearing_vectors1.len()
             || cam_correspondences1
@@ -33,7 +33,7 @@ impl<'a> NoncentralRelativeAdapter<'a> {
                 .iter()
                 .any(|&i| i >= cam_offsets.len() || i >= cam_rotations.len())
         {
-            return Err("adapter storage shape violates correspondence bounds".into());
+            return Err(crate::invalid_correspondences());
         }
         Ok(Self {
             bearing_vectors1,

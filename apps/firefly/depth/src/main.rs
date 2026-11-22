@@ -27,14 +27,24 @@ struct Arguments {
     simulation: bool,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::process::ExitCode {
+    firefly_error::report("depth", run_app())
+}
+
+fn run_app() -> firefly_error::Result<()> {
     let args = Arguments::parse();
     firefly_observability::init();
     let _guard = SignalHandler::register_multiple_signals(
         &vec![FetchableSignal::Interrupt, FetchableSignal::Terminate],
         &|_| RUNNING.store(false, Ordering::Relaxed),
     )
-    .map_err(|e| format!("depth signal handler: {e:?}"))?;
+    .map_err(|e| {
+        firefly_error::Error::caused_by(
+            firefly_error::ErrorKind::Internal,
+            "register shutdown signals",
+            e,
+        )
+    })?;
     let node = create_node()?;
     let logs = firefly_observability::init_ipc(&node, "depth");
     let mut model = model::Model::open(args.simulation)?;

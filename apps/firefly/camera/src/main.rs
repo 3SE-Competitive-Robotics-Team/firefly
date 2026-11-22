@@ -18,13 +18,20 @@ struct Arguments {
     hil: bool,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::process::ExitCode {
+    firefly_error::report("camera", run_app())
+}
+
+fn run_app() -> firefly_error::Result<()> {
     let args = Arguments::parse();
     if args.hil {
         #[cfg(target_os = "linux")]
         return hil::run();
         #[cfg(not(target_os = "linux"))]
-        return Err("HIL 接口需要 Linux".into());
+        return Err(firefly_error::Error::new(
+            firefly_error::ErrorKind::Unsupported,
+            "HIL 接口需要 Linux",
+        ));
     }
     let config = args
         .config
@@ -33,6 +40,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn run(_config: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
-    Err("camera 依赖 Linux V4L2".into())
+fn run(_config: &std::path::Path) -> firefly_error::Result<()> {
+    Err(firefly_error::Error::new(
+        firefly_error::ErrorKind::Unsupported,
+        "camera 依赖 Linux V4L2",
+    ))
 }

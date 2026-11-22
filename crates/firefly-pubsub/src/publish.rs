@@ -1,5 +1,6 @@
 //! 泛型发布端：注入 trace 上下文，并按需发送事件唤醒。
 
+use firefly_error::{Error, ErrorKind};
 use std::fmt::Debug;
 
 use fastrace::prelude::*;
@@ -72,7 +73,11 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
     pub fn update_connections(&self) -> Result<(), firefly_error::Error> {
         use iceoryx2::port::update_connections::UpdateConnections;
         self.publisher.update_connections().map_err(|error| {
-            firefly_error::Error::new(firefly_error::ErrorKind::Internal, error.to_string())
+            Error::caused_by(
+                ErrorKind::Unavailable,
+                "update publisher connections",
+                error,
+            )
         })
     }
 
@@ -85,10 +90,8 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
     ) -> Result<Self, firefly_error::Error> {
         let mut builder = node
             .service_builder(&topic.try_into().map_err(|e| {
-                firefly_error::Error::new(
-                    firefly_error::ErrorKind::InvalidArgument,
-                    format!("非法话题名 `{topic}`: {e:?}"),
-                )
+                Error::caused_by(ErrorKind::InvalidArgument, "非法话题名", e)
+                    .with_context("topic", topic)
             })?)
             .publish_subscribe::<T>()
             .user_header::<TraceContext>();
@@ -102,16 +105,12 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
             builder = builder.max_publishers(max);
         }
         let service = builder.open_or_create().map_err(|e| {
-            firefly_error::Error::new(
-                firefly_error::ErrorKind::Internal,
-                format!("打开/创建话题 `{topic}` 失败: {e:?}"),
-            )
+            Error::caused_by(ErrorKind::Unavailable, "打开/创建话题 失败", e)
+                .with_context("topic", topic)
         })?;
         let publisher = service.publisher_builder().create().map_err(|e| {
-            firefly_error::Error::new(
-                firefly_error::ErrorKind::Internal,
-                format!("创建 `{topic}` 发布器失败: {e:?}"),
-            )
+            Error::caused_by(ErrorKind::Unavailable, "创建 发布器失败", e)
+                .with_context("topic", topic)
         })?;
         Ok(Self {
             publisher,
@@ -150,12 +149,7 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
     /// # Errors
     /// 借出样本失败或发送失败（如发布端超时）。
     pub fn publish_counted(&self, msg: T) -> Result<(usize, TraceContext), firefly_error::Error> {
-        let sample = self.publisher.loan_uninit().map_err(|e| {
-            firefly_error::Error::temporary(
-                firefly_error::ErrorKind::ResourceExhausted,
-                format!("借出零拷贝样本失败: {e:?}"),
-            )
-        })?;
+        let sample = self.publisher.loan_uninit().map_err(loan_error)?;
         let sample = sample.write_payload(msg);
         self.send_sample(sample)
     }
@@ -172,12 +166,7 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
     where
         T: Default,
     {
-        let mut sample = self.publisher.loan().map_err(|e| {
-            firefly_error::Error::temporary(
-                firefly_error::ErrorKind::ResourceExhausted,
-                format!("借出零拷贝样本失败: {e:?}"),
-            )
-        })?;
+        let mut sample = self.publisher.loan().map_err(loan_error)?;
         fill(sample.payload_mut());
         self.send_sample(sample).map(|(_, ctx)| ctx)
     }
@@ -202,12 +191,7 @@ impl<T: Debug + IceoryxSend + ?Sized + 'static> Publisher<T> {
                 }
                 (receivers, ctx)
             })
-            .map_err(|e| {
-                firefly_error::Error::temporary(
-                    firefly_error::ErrorKind::ResourceExhausted,
-                    format!("发送样本失败: {e:?}"),
-                )
-            })
+            .map_err(send_error)
     }
 }
 
@@ -217,10 +201,8 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<[T]> {
     /// 服务或发布器创建失败。
     pub fn with_slice_topic(node: &IpcNode, topic: &str) -> Result<Self, firefly_error::Error> {
         let name = topic.try_into().map_err(|e| {
-            firefly_error::Error::new(
-                firefly_error::ErrorKind::InvalidArgument,
-                format!("非法话题名: {e:?}"),
-            )
+            Error::caused_by(ErrorKind::InvalidArgument, "非法话题名", e)
+                .with_context("topic", topic)
         })?;
         let service = node
             .service_builder(&name)
@@ -228,20 +210,16 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<[T]> {
             .user_header::<TraceContext>()
             .open_or_create()
             .map_err(|e| {
-                firefly_error::Error::new(
-                    firefly_error::ErrorKind::Internal,
-                    format!("创建切片服务失败: {e:?}"),
-                )
+                Error::caused_by(ErrorKind::Unavailable, "创建切片服务失败", e)
+                    .with_context("topic", topic)
             })?;
         let publisher = service
             .publisher_builder()
             .allocation_strategy(AllocationStrategy::PowerOfTwo)
             .create()
             .map_err(|e| {
-                firefly_error::Error::new(
-                    firefly_error::ErrorKind::Internal,
-                    format!("创建切片发布器失败: {e:?}"),
-                )
+                Error::caused_by(ErrorKind::Unavailable, "创建切片发布器失败", e)
+                    .with_context("topic", topic)
             })?;
         Ok(Self {
             publisher,
@@ -260,13 +238,57 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<[T]> {
         let sample = self
             .publisher
             .loan_slice_uninit(len)
-            .map_err(|e| {
-                firefly_error::Error::temporary(
-                    firefly_error::ErrorKind::ResourceExhausted,
-                    format!("借出切片失败: {e:?}"),
-                )
-            })?
+            .map_err(loan_error)?
             .write_from_fn(fill);
         self.send_sample(sample).map(|(_, trace)| trace)
+    }
+}
+
+#[track_caller]
+fn loan_error(e: iceoryx2::port::LoanError) -> Error {
+    use iceoryx2::port::LoanError;
+    match e {
+        LoanError::ExceedsMaxLoans | LoanError::OutOfMemory => {
+            Error::temporary(ErrorKind::ResourceExhausted, "loan IPC sample").with_source(e)
+        }
+        LoanError::ExceedsMaxLoanSize => {
+            Error::caused_by(ErrorKind::OutOfRange, "loan IPC sample", e)
+        }
+        LoanError::InternalFailure => Error::caused_by(ErrorKind::Internal, "loan IPC sample", e),
+    }
+}
+
+#[track_caller]
+fn send_error(e: iceoryx2::port::SendError) -> Error {
+    use iceoryx2::port::SendError;
+    let kind = match e {
+        SendError::LoanError(source) => return loan_error(source),
+        SendError::InternalError => ErrorKind::Internal,
+        SendError::ConnectionBrokenSinceSenderNoLongerExists
+        | SendError::ConnectionCorrupted
+        | SendError::ConnectionError(_)
+        | SendError::UnableToDeliver => ErrorKind::Unavailable,
+    };
+    Error::caused_by(kind, "send IPC sample", e)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iceoryx2::port::{LoanError, SendError};
+
+    #[test]
+    fn only_resource_pressure_makes_a_loan_retryable() {
+        let exhausted = loan_error(LoanError::ExceedsMaxLoans);
+        assert_eq!(exhausted.kind(), ErrorKind::ResourceExhausted);
+        assert!(exhausted.is_retryable());
+
+        let oversized = loan_error(LoanError::ExceedsMaxLoanSize);
+        assert_eq!(oversized.kind(), ErrorKind::OutOfRange);
+        assert!(!oversized.is_retryable());
+
+        let partial = send_error(SendError::UnableToDeliver);
+        assert_eq!(partial.kind(), ErrorKind::Unavailable);
+        assert!(!partial.is_retryable());
     }
 }

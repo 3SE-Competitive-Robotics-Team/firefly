@@ -52,7 +52,7 @@ struct Daemon {
     last_flight: u64,
 }
 impl Daemon {
-    fn new(store: Store) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(store: Store) -> firefly_error::Result<Self> {
         let store::Recovered {
             session,
             last_flight,
@@ -76,31 +76,46 @@ impl Daemon {
             team: firefly_config::game::load()?.team.code(),
         })
     }
-    fn ground(&self) -> Result<(firefly_pubsub::odom::OdomMessage, u64), String> {
+    fn ground(&self) -> firefly_error::Result<(firefly_pubsub::odom::OdomMessage, u64)> {
+        use firefly_error::{Error, ErrorKind};
         if self.bus.airframe.within(Duration::from_secs(3)).is_none() {
-            return Err("waiting for actuator airframe data".into());
+            return Err(Error::temporary(
+                ErrorKind::Unavailable,
+                "waiting for actuator airframe data",
+            ));
         }
-        let (pose, session, mode) = self
-            .bus
-            .navigation()
-            .ok_or("waiting for fresh FC, attitude and initialized odometry")?;
+        let (pose, session, mode) = self.bus.navigation().ok_or_else(|| {
+            Error::temporary(
+                ErrorKind::Unavailable,
+                "waiting for fresh FC, attitude and initialized odometry",
+            )
+        })?;
         if mode != Mode::Disarmed {
-            return Err(format!(
-                "waiting for FC DISARMED, currently {}",
-                mode.name()
+            return Err(Error::temporary(
+                ErrorKind::Unavailable,
+                format!("waiting for FC DISARMED, currently {}", mode.name()),
             ));
         }
         let velocity = speed(pose);
         if self.bus.fc.fresh().is_none_or(|fc| fc.can_arm != 1) {
-            return Err("waiting for FC arming checks".into());
+            return Err(Error::temporary(
+                ErrorKind::Unavailable,
+                "waiting for FC arming checks",
+            ));
         }
         if velocity > 0.12 {
-            return Err(format!(
-                "waiting for stationary odometry, speed {velocity:.3} m/s exceeds 0.12 m/s"
+            return Err(Error::temporary(
+                ErrorKind::Unavailable,
+                format!(
+                    "waiting for stationary odometry, speed {velocity:.3} m/s exceeds 0.12 m/s"
+                ),
             ));
         }
         if self.session.is_some_and(|s| s != session) {
-            return Err("VIO session changed during system run".into());
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "VIO session changed during system run",
+            ));
         }
         Ok((pose, session))
     }
@@ -115,7 +130,7 @@ impl Daemon {
                     .and_then(|fc| Mode::from_code(fc.mode))
                     .map(Mode::name);
                 return Ok(Ok(
-                    json!({"run":self.run,"ready":ground.is_ok() && self.flight.is_none(),"waiting":ground.err(),
+                    json!({"run":self.run,"ready":ground.is_ok() && self.flight.is_none(),"waiting":ground.as_ref().err().map(firefly_error::Error::message),
                 "session":self.session,"fc_mode":mode,"planner_ready":self.bus.heartbeat.fresh().is_some(),
                 "active":self.flight.as_ref().map(|f|overview(&f.mission, f.phase()))}),
                 ));
@@ -160,14 +175,14 @@ impl Daemon {
                     return Ok(Err("another mission is active".into()));
                 }
                 if let Err(e) = plan.validate() {
-                    return Ok(Err(e.into()));
+                    return Ok(Err(e.message().to_owned()));
                 }
                 if !plan.waypoints.is_empty() && self.bus.heartbeat.fresh().is_none() {
                     return Ok(Err("waiting for planner heartbeat".into()));
                 }
                 let (p, session) = match self.ground() {
                     Ok(v) => v,
-                    Err(e) => return Ok(Err(e)),
+                    Err(e) => return Ok(Err(e.message().to_owned())),
                 };
                 let f = Flight::new(Mission {
                     id,
@@ -190,7 +205,7 @@ impl Daemon {
             }
         }
     }
-    fn tick(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    fn tick(&mut self) -> firefly_error::Result<()> {
         let Some(f) = &mut self.flight else {
             return Ok(());
         };
@@ -233,7 +248,7 @@ impl Daemon {
         &mut self,
         requests: &Receiver<Query>,
         stopping: &AtomicBool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> firefly_error::Result<()> {
         #[cfg(target_os = "linux")]
         let mut watchdog = watchdog::Watchdog::ready()?;
         let mut pending_reply: Option<(SyncSender<Reply>, Reply)> = None;
@@ -301,7 +316,7 @@ impl Daemon {
         Ok(self.journal.state())
     }
 
-    fn stop(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    fn stop(&mut self) -> firefly_error::Result<()> {
         if let Some(f) = &mut self.flight {
             if !matches!(f.phase(), Phase::Recover | Phase::NeedsOperator) {
                 f.interrupt("service stopping");
@@ -352,7 +367,11 @@ fn client(stream: &UnixStream, tx: &SyncSender<Query>) -> io::Result<()> {
 #[usage(bin = "firefly-daemon")]
 struct Arguments {}
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::process::ExitCode {
+    firefly_error::report("firefly-daemon", run_app())
+}
+
+fn run_app() -> firefly_error::Result<()> {
     Arguments::parse();
     iceoryx2::prelude::set_log_level(iceoryx2::prelude::LogLevel::Error);
     let dir = firefly_mission::runtime_dir();
@@ -362,7 +381,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .truncate(false)
         .write(true)
         .open(dir.join("mission.lock"))?;
-    lock.try_lock()?;
+    lock.try_lock().map_err(|e| {
+        firefly_error::Error::from(e)
+            .with_operation("lock mission service")
+            .with_context("directory", dir.display())
+    })?;
     let missions = firefly_config::paths::root().join("state/missions");
     let mut daemon = Daemon::new(Store::open(&missions, boot::run_id()?)?)?;
     let path = firefly_mission::socket_path();
@@ -392,6 +415,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     let result = daemon.serve(&rx, &stopping);
-    fs::remove_file(path)?;
-    result
+    let cleanup = fs::remove_file(&path);
+    result?;
+    cleanup.map_err(|e| {
+        firefly_error::Error::from(e)
+            .with_operation("remove mission socket")
+            .with_context("path", path.display())
+    })
 }

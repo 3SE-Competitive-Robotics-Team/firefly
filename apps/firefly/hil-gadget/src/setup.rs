@@ -1,3 +1,4 @@
+use firefly_error::{Error, ErrorKind, IoResultExt, Result};
 use std::fs;
 use std::io::Read;
 use std::os::unix::net::UnixDatagram;
@@ -40,7 +41,7 @@ const HOST_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 const FUNCTIONS: [&str; 2] = [ADB, HIL.name];
 
-pub fn up() -> Result<(), String> {
+pub fn up() -> Result<()> {
     let _transition = crate::transition::lock(Path::new(STATE_DIR))?;
     note("开始：停止 firefly 与 adbd，整块重建 gadget");
     if let Err(error) = up_inner() {
@@ -54,7 +55,7 @@ pub fn up() -> Result<(), String> {
     Ok(())
 }
 
-fn up_inner() -> Result<(), String> {
+fn up_inner() -> Result<()> {
     remove_file(READY)?;
     remove_file(UP_MARKER)?;
     remove_file(RESTORE_MARKER)?;
@@ -68,28 +69,28 @@ fn up_inner() -> Result<(), String> {
     rebuild(true)?;
     start_firefly();
     fs::write(UP_MARKER, format!("{}\n", now_seconds()))
-        .map_err(|error| format!("write {UP_MARKER}: {error}"))?;
+        .at_path("write HIL marker", Path::new(UP_MARKER))?;
     sync_disk();
     note("HIL gadget 已绑定：单个 hil 功能（OUT + IN）");
     println!("HIL gadget 已绑定：单个 hil 功能（OUT + IN）");
     Ok(())
 }
 
-pub fn serve() -> Result<(), String> {
+pub fn serve() -> Result<()> {
     note("serve：打开 ep0 并写描述符");
     let mut ep0 = open_ep0(HIL.name)?;
-    write_descriptors(&mut ep0, &HIL)
-        .map_err(|error| format!("write {} descriptors: {error}", HIL.name))?;
+    write_descriptors(&mut ep0, &HIL).map_err(|error| {
+        Error::from(error)
+            .with_operation("write descriptors")
+            .with_context("function", HIL.name)
+    })?;
     fs::write(READY, format!("{}\n", std::process::id()))
-        .map_err(|error| format!("write {READY}: {error}"))?;
+        .at_path("write HIL marker", Path::new(READY))?;
     note("serve：描述符已写入，保持 ep0");
-    if let Err(error) = hold(&mut ep0) {
-        note(&format!("serve 退出：{error}"));
-    }
-    Ok(())
+    hold(&mut ep0).map_err(|e| Error::from(e).with_operation("read FunctionFS events"))
 }
 
-pub fn diag() -> Result<(), String> {
+pub fn diag() -> Result<()> {
     let _transition = crate::transition::lock(Path::new(STATE_DIR))?;
     note("diag：单个 hil 功能");
     stop_firefly();
@@ -105,7 +106,7 @@ pub fn diag() -> Result<(), String> {
     result.and(restore)
 }
 
-fn diag_inner(functions: &[&firefly_hil::gadget::Function]) -> Result<(), String> {
+fn diag_inner(functions: &[&firefly_hil::gadget::Function]) -> Result<()> {
     destroy_gadget()?;
     ensure_gadget()?;
     for function in functions {
@@ -156,7 +157,7 @@ fn describe_dir(path: &Path) -> String {
     )
 }
 
-pub fn down() -> Result<(), String> {
+pub fn down() -> Result<()> {
     let _transition = crate::transition::lock(Path::new(STATE_DIR))?;
     note("down：停止 firefly，恢复 adb-only gadget");
     stop_firefly();
@@ -167,7 +168,7 @@ pub fn down() -> Result<(), String> {
     Ok(())
 }
 
-pub fn watchdog() -> Result<(), String> {
+pub fn watchdog() -> Result<()> {
     thread::sleep(WATCHDOG_TIMEOUT);
     loop {
         match watchdog_state(
@@ -230,7 +231,7 @@ pub fn status() {
 }
 
 /// 重建 gadget：`hil = true` 只建 `hil` 功能，`false` 只建 adb。
-fn rebuild(hil: bool) -> Result<(), String> {
+fn rebuild(hil: bool) -> Result<()> {
     match rebuild_once(hil) {
         Ok(()) => Ok(()),
         Err(error) => {
@@ -241,7 +242,7 @@ fn rebuild(hil: bool) -> Result<(), String> {
     }
 }
 
-fn rebuild_once(hil: bool) -> Result<(), String> {
+fn rebuild_once(hil: bool) -> Result<()> {
     destroy_gadget()?;
     ensure_gadget()?;
     if hil {
@@ -275,7 +276,7 @@ fn rebuild_once(hil: bool) -> Result<(), String> {
 }
 
 /// 解绑并删除整个 `g1`，清掉残留的 `udc_name` 与接口计数。
-fn destroy_gadget() -> Result<(), String> {
+fn destroy_gadget() -> Result<()> {
     let udc_path = Path::new(GADGET).join("UDC");
     if udc_path.exists() {
         match fs::write(&udc_path, "\n") {
@@ -310,14 +311,14 @@ fn destroy_gadget() -> Result<(), String> {
     ] {
         let dir = Path::new(GADGET).join(path);
         if dir.exists() {
-            remove_dir_with_retry(&dir).map_err(|error| format!("destroy g1/{path}: {error}"))?;
+            remove_dir_with_retry(&dir)?;
         }
     }
     note("destroy：g1 已删除，计数器清零");
     Ok(())
 }
 
-fn ensure_gadget() -> Result<(), String> {
+fn ensure_gadget() -> Result<()> {
     for path in [
         "",
         "strings/0x409",
@@ -326,7 +327,7 @@ fn ensure_gadget() -> Result<(), String> {
         "functions",
     ] {
         let dir = Path::new(GADGET).join(path);
-        fs::create_dir_all(&dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
+        fs::create_dir_all(&dir).at_path("create", &dir)?;
     }
     // configfs 新建 gadget 的 idVendor/idProduct 默认是 "0x0000"（不是空串），
     // 必须无条件写入，否则设备描述符会以 0000:0000 枚举。
@@ -348,21 +349,21 @@ fn ensure_gadget() -> Result<(), String> {
     write_value(&Path::new(GADGET).join("configs/c.1/MaxPower"), "500")
 }
 
-fn bind_udc() -> Result<(), String> {
+fn bind_udc() -> Result<()> {
     let udc = udc_name()?;
     let path = Path::new(GADGET).join("UDC");
     fs::write(&path, format!("{udc}\n")).map_err(|error| {
-        format!(
-            "写 UDC {udc} 失败：{error}；内核日志：{}",
-            kernel_gadget_log()
-        )
+        Error::from(error)
+            .with_operation("bind UDC")
+            .with_context("udc", &udc)
+            .with_context("kernel", kernel_gadget_log())
     })?;
     if wait_udc_value(&path, &udc, BIND_TIMEOUT) {
         return Ok(());
     }
-    Err(format!(
-        "UDC {udc} 绑定后未生效；内核日志：{}",
-        kernel_gadget_log()
+    Err(Error::new(
+        ErrorKind::Timeout,
+        format!("UDC {udc} 绑定后未生效；内核日志：{}", kernel_gadget_log()),
     ))
 }
 
@@ -388,16 +389,19 @@ fn wait_udc_empty(path: &Path, timeout: Duration) -> bool {
     false
 }
 
-fn udc_name() -> Result<String, String> {
-    let dir =
-        fs::read_dir("/sys/class/udc").map_err(|error| format!("read /sys/class/udc: {error}"))?;
+fn udc_name() -> Result<String> {
+    let dir = fs::read_dir("/sys/class/udc")
+        .map_err(|error| Error::from(error).with_operation("read /sys/class/udc"))?;
     let mut names: Vec<String> = dir
         .filter_map(std::result::Result::ok)
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
     let [name] = names.as_slice() else {
-        return Err(format!("期望唯一 UDC，实际 {names:?}"));
+        return Err(Error::new(
+            ErrorKind::Unavailable,
+            format!("期望唯一 UDC，实际 {names:?}"),
+        ));
     };
     Ok(name.clone())
 }
@@ -410,19 +414,21 @@ fn adb_serial() -> String {
         .unwrap_or_else(|| "firefly-0001".to_owned())
 }
 
-fn create_function(name: &str) -> Result<(), String> {
+fn create_function(name: &str) -> Result<()> {
     let function = Path::new(GADGET)
         .join("functions")
         .join(format!("ffs.{name}"));
-    fs::create_dir(&function).map_err(|error| format!("create {}: {error}", function.display()))
+    fs::create_dir(&function).at_path("create", &function)
 }
 
-fn mount_function(name: &str) -> Result<(), String> {
+fn mount_function(name: &str) -> Result<()> {
     let mountpoint = Path::new(FFS_ROOT).join(name);
-    fs::create_dir_all(&mountpoint)
-        .map_err(|error| format!("create {}: {error}", mountpoint.display()))?;
+    fs::create_dir_all(&mountpoint).at_path("create", &mountpoint)?;
     if is_mounted(&mountpoint) {
-        return Err(format!("{} 仍已挂载", mountpoint.display()));
+        return Err(Error::new(
+            ErrorKind::Unavailable,
+            format!("{} 仍已挂载", mountpoint.display()),
+        ));
     }
     let mut command = Command::new("mount");
     command.args(["-t", "functionfs"]);
@@ -432,33 +438,35 @@ fn mount_function(name: &str) -> Result<(), String> {
     command.arg(name).arg(&mountpoint);
     let output = command
         .output()
-        .map_err(|error| format!("spawn mount: {error}"))?;
+        .map_err(|error| Error::from(error).with_operation("spawn mount"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         note(&format!("mount {name} 失败：{stderr}"));
-        return Err(format!("mount {name}：{stderr}"));
+        return Err(Error::new(
+            ErrorKind::Unavailable,
+            format!("mount {name}：{stderr}"),
+        ));
     }
     Ok(())
 }
 
-fn link_function(name: &str) -> Result<(), String> {
+fn link_function(name: &str) -> Result<()> {
     let link = Path::new(GADGET)
         .join("configs/c.1")
         .join(format!("ffs.{name}"));
     let target = Path::new(GADGET)
         .join("functions")
         .join(format!("ffs.{name}"));
-    std::os::unix::fs::symlink(&target, &link)
-        .map_err(|error| format!("link {}: {error}", link.display()))
+    std::os::unix::fs::symlink(&target, &link).at_path("link", &link)
 }
 
-fn restore_adb() -> Result<(), String> {
+fn restore_adb() -> Result<()> {
     let _transition = crate::transition::lock(Path::new(STATE_DIR))?;
     restore_adb_inner()
 }
 
 /// Caller holds the transition lock through service startup and the final marker.
-fn restore_adb_inner() -> Result<(), String> {
+fn restore_adb_inner() -> Result<()> {
     note("restore：停止 HIL 进程，重建 adb-only gadget");
     stop_firefly();
     kill_serve();
@@ -473,16 +481,17 @@ fn restore_adb_inner() -> Result<(), String> {
     Ok(())
 }
 
-fn start_serve() -> Result<(), String> {
+fn start_serve() -> Result<()> {
     start_daemon("serve", SERVE_PID)
 }
 
-fn start_watchdog() -> Result<(), String> {
+fn start_watchdog() -> Result<()> {
     start_daemon("watchdog", WATCHDOG_PID)
 }
 
-fn start_daemon(command: &str, pidfile: &str) -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|error| format!("current_exe: {error}"))?;
+fn start_daemon(command: &str, pidfile: &str) -> Result<()> {
+    let exe = std::env::current_exe()
+        .map_err(|error| Error::from(error).with_operation("current_exe"))?;
     let _ = Command::new(START_STOP_DAEMON)
         .args([
             "--stop",
@@ -515,17 +524,24 @@ fn start_daemon(command: &str, pidfile: &str) -> Result<(), String> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map_err(|error| format!("spawn {command}: {error}"))?;
+        .map_err(|error| {
+            Error::from(error)
+                .with_operation("spawn")
+                .with_context("command", command)
+        })?;
     if !status.success() {
-        return Err(format!(
-            "start-stop-daemon 启动 {command} 退出 {}",
-            status.code().unwrap_or(-1)
+        return Err(Error::new(
+            ErrorKind::Unavailable,
+            format!(
+                "start-stop-daemon 启动 {command} 退出 {}",
+                status.code().unwrap_or(-1)
+            ),
         ));
     }
     Ok(())
 }
 
-fn wait_ready() -> Result<(), String> {
+fn wait_ready() -> Result<()> {
     let deadline = Instant::now() + READY_TIMEOUT;
     while Instant::now() < deadline {
         if Path::new(READY).is_file() {
@@ -533,21 +549,28 @@ fn wait_ready() -> Result<(), String> {
         }
         thread::sleep(Duration::from_millis(20));
     }
-    Err(format!("描述符写入超时；日志：{}", read_log()))
+    Err(Error::new(
+        ErrorKind::Timeout,
+        format!("描述符写入超时；日志：{}", read_log()),
+    ))
 }
 
-fn spawn_adbd() -> Result<(), String> {
+fn spawn_adbd() -> Result<()> {
     // The HIL watchdog runs pinned to CPU 0, so adbd would inherit that mask; restore the
     // full online CPU set when the watchdog respawns adb.
     let online = fs::read_to_string("/sys/devices/system/cpu/online")
-        .map_err(|error| format!("read online CPUs: {error}"))?;
+        .map_err(|error| Error::from(error).with_operation("read online CPUs"))?;
     Command::new("/usr/bin/taskset")
         .args(["-c", online.trim(), ADBD])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|error| format!("spawn {ADBD}: {error}"))?;
+        .map_err(|error| {
+            Error::from(error)
+                .with_operation("spawn")
+                .with_context("command", ADBD)
+        })?;
     Ok(())
 }
 
@@ -565,13 +588,13 @@ fn hold(ep0: &mut fs::File) -> std::io::Result<()> {
     }
 }
 
-fn open_ep0(name: &str) -> Result<fs::File, String> {
+fn open_ep0(name: &str) -> Result<fs::File> {
     let path = Path::new(FFS_ROOT).join(name).join("ep0");
     fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(&path)
-        .map_err(|error| format!("open {}: {error}", path.display()))
+        .at_path("open", &path)
 }
 
 fn stop_adb_rebind_loop() {
@@ -586,10 +609,13 @@ fn stop_adb_rebind_loop() {
 }
 
 /// 切换到完整 HIL 进程清单；源文件必须由部署提供。
-fn switch_processes_to_hil() -> Result<(), String> {
+fn switch_processes_to_hil() -> Result<()> {
     let source = format!("{PROCESSES_DIR}/{PROCESSES_HIL}");
     if !Path::new(&source).is_file() {
-        return Err(format!("缺少 {source}（deploy 未带上）"));
+        return Err(Error::new(
+            ErrorKind::NotFound,
+            format!("缺少 {source}（deploy 未带上）"),
+        ));
     }
     switch_process_manifest(
         Path::new(&source),
@@ -601,7 +627,7 @@ fn switch_processes_to_hil() -> Result<(), String> {
     Ok(())
 }
 
-fn restore_processes() -> Result<(), String> {
+fn restore_processes() -> Result<()> {
     if restore_process_manifest(Path::new(PROCESSES_BACKUP), Path::new(PROCESSES))? {
         note("进程清单已恢复为真机");
     }
@@ -609,20 +635,19 @@ fn restore_processes() -> Result<(), String> {
     Ok(())
 }
 
-fn switch_process_manifest(source: &Path, active: &Path, backup: &Path) -> Result<(), String> {
+fn switch_process_manifest(source: &Path, active: &Path, backup: &Path) -> Result<()> {
     if !backup.exists() {
-        fs::copy(active, backup)
-            .map_err(|error| format!("backup {}: {error}", active.display()))?;
+        fs::copy(active, backup).at_path("backup", &active)?;
     }
-    fs::copy(source, active).map_err(|error| format!("switch {}: {error}", active.display()))?;
+    fs::copy(source, active).at_path("switch", &active)?;
     Ok(())
 }
 
-fn restore_process_manifest(backup: &Path, active: &Path) -> Result<bool, String> {
+fn restore_process_manifest(backup: &Path, active: &Path) -> Result<bool> {
     if !backup.exists() {
         return Ok(false);
     }
-    fs::copy(backup, active).map_err(|error| format!("restore {}: {error}", active.display()))?;
+    fs::copy(backup, active).at_path("restore", &active)?;
     remove_file(backup)?;
     Ok(true)
 }
@@ -706,7 +731,7 @@ fn kill_serve() {
     remove_file(SERVE_PID).ok();
 }
 
-fn umount(path: &Path) -> Result<(), String> {
+fn umount(path: &Path) -> Result<()> {
     if !is_mounted(path) {
         return Ok(());
     }
@@ -726,7 +751,10 @@ fn umount(path: &Path) -> Result<(), String> {
         thread::sleep(Duration::from_millis(100));
     }
     if is_mounted(path) {
-        return Err(format!("{} 无法卸载", path.display()));
+        return Err(Error::new(
+            ErrorKind::Unavailable,
+            format!("{} 无法卸载", path.display()),
+        ));
     }
     Ok(())
 }
@@ -740,23 +768,25 @@ fn is_mounted(path: &Path) -> bool {
     })
 }
 
-fn remove_dir_with_retry(path: &Path) -> Result<(), String> {
-    let mut last_error = String::new();
-    for _ in 0..40 {
+fn remove_dir_with_retry(path: &Path) -> Result<()> {
+    for attempt in 1..=40 {
         match fs::remove_dir(path) {
             Ok(()) => return Ok(()),
             Err(error) => {
-                last_error = format!("{error}");
+                if attempt == 40 {
+                    return Err(Error::from(error)
+                        .with_operation("remove gadget directory")
+                        .with_context("path", path.display()));
+                }
                 thread::sleep(Duration::from_millis(50));
             }
         }
     }
-    Err(format!("remove {}: {last_error}", path.display()))
+    Ok(())
 }
 
-fn write_value(path: &Path, value: &str) -> Result<(), String> {
-    fs::write(path, format!("{value}\n"))
-        .map_err(|error| format!("write {}: {error}", path.display()))
+fn write_value(path: &Path, value: &str) -> Result<()> {
+    fs::write(path, format!("{value}\n")).at_path("write", &path)
 }
 
 fn read_trimmed(path: &Path) -> Option<String> {
@@ -765,12 +795,14 @@ fn read_trimmed(path: &Path) -> Option<String> {
         .map(|text| text.trim().to_owned())
 }
 
-fn remove_file(path: impl AsRef<Path>) -> Result<(), String> {
+fn remove_file(path: impl AsRef<Path>) -> Result<()> {
     let path = path.as_ref();
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("remove {}: {error}", path.display())),
+        Err(error) => Err(Error::from(error)
+            .with_operation("remove")
+            .with_context("path", path.display())),
     }
 }
 

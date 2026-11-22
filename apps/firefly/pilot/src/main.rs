@@ -804,8 +804,12 @@ fn publish_scalars(viz: &VizPublisher, t: f64, entity: &str, values: &[f64]) {
     let _ = viz.publish(msg);
 }
 
+fn main() -> std::process::ExitCode {
+    firefly_error::report("pilot", run_app())
+}
+
 #[allow(clippy::too_many_lines)] // 进程生命周期与控制节拍编排
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn run_app() -> firefly_error::Result<()> {
     let args = Arguments::parse();
     let config_path = args.config.unwrap_or_else(default_config);
     let cfg = firefly_config::startup::<config::PilotConfig>(
@@ -822,7 +826,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &|_signal| {
             RUNNING.store(false, Ordering::Relaxed);
         },
-    )?;
+    )
+    .map_err(|e| {
+        firefly_error::Error::caused_by(
+            firefly_error::ErrorKind::Internal,
+            "register shutdown signals",
+            e,
+        )
+    })?;
 
     if !args.simulation {
         return usb::run(&cfg.device);
@@ -836,7 +847,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         config_path.display()
     );
 
-    let imu_worker = imu::Worker::spawn(cfg.imu)?;
+    let mut imu_worker = imu::Worker::spawn(cfg.imu)?;
     let mut imu_count = 0u64;
     let mut inputs = Inputs::default();
     let mut controller = Controller::new(cfg.fsm, cfg.control);
@@ -944,7 +955,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "飞控进程退出（t={sim_time:.2}，状态 {}）",
         controller.fsm.state().name()
     );
-    Ok(())
+    imu_worker.finish()
 }
 
 #[cfg(test)]

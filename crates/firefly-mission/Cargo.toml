@@ -10,6 +10,7 @@ keywords = ["robotics", "mission"]
 categories = ["embedded"]
 
 [dependencies]
+firefly-error.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["float_roundtrip"] }
 firefly-config.workspace = true

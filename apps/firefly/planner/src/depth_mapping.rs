@@ -37,7 +37,7 @@ const MAX_COLLISION_RUNS: usize = 1_000_000;
 #[derive(Default)]
 struct Shared {
     latest: Option<LocalSnapshot>,
-    error: Option<String>,
+    error: Option<Error>,
 }
 
 pub struct DepthReceiver {
@@ -57,24 +57,23 @@ impl DepthReceiver {
             .spawn(move || {
                 if let Err(error) = run_mapping(fusion, &history, &stopping, &state, &ready) {
                     if let Ok(mut state) = state.lock() {
-                        state.error = Some(error.to_string());
+                        state.error = Some(error.clone());
                         state.latest = None;
                     }
-                    let _ = ready.send(Err(error.to_string()));
                     log::error!("depth mapping receiver: {error}");
+                    let _ = ready.send(Err(error));
                 }
                 stopping.store(true, Ordering::Release);
             })
-            .map_err(|e| internal(e.to_string()))?;
-        let mut receiver = Self {
+            .map_err(|e| Error::from(e).with_operation("spawn depth mapping"))?;
+        let receiver = Self {
             shared,
             stop,
             thread: Some(thread),
         };
-        if let Err(error) = startup.recv().map_err(|e| e.to_string()).and_then(|v| v) {
-            receiver.shutdown();
-            return Err(internal(error).with_operation("start depth mapping"));
-        }
+        startup
+            .recv()
+            .map_err(|e| Error::caused_by(ErrorKind::Unavailable, "start depth mapping", e))??;
         Ok(receiver)
     }
 
@@ -84,7 +83,7 @@ impl DepthReceiver {
             .lock()
             .map_err(|_| internal("depth state poisoned"))?;
         if let Some(error) = &shared.error {
-            return Err(internal(error.clone()));
+            return Err(error.clone());
         }
         if !self.stop.load(Ordering::Acquire)
             && self.thread.as_ref().is_some_and(JoinHandle::is_finished)
@@ -120,7 +119,7 @@ fn run_mapping(
     history: &OdometryHistory,
     stop: &AtomicBool,
     shared: &Mutex<Shared>,
-    ready: &SyncSender<std::result::Result<(), String>>,
+    ready: &SyncSender<Result<()>>,
 ) -> Result<()> {
     let node = create_node()?;
     let subscriber = Subscriber::<DepthImageMessage>::with_topic(&node, DEPTH_TOPIC)?;

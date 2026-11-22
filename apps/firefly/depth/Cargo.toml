@@ -11,6 +11,7 @@ keywords = ["robotics", "depth", "inference"]
 categories = ["robotics"]
 
 [dependencies]
+firefly-error.workspace = true
 fastrace.workspace = true
 firefly-config.workspace = true
 firefly-observability.workspace = true

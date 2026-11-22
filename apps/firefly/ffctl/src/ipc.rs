@@ -74,16 +74,6 @@ pub(crate) fn wall_seconds() -> f64 {
     wall_nanos() as f64 / 1e9
 }
 
-/// 命令结果的统一出口：成功 `0`，失败把**消息本体**写 stderr 并退 `1`。
-///
-/// 只打消息本体：`firefly_error` 的 `Display` 带 kind 与源码位置（给日志的），
-/// 操作员要的是一行原因。
-pub(crate) fn report(result: Result<(), Error>) -> ExitCode {
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(err) => {
-            eprintln!("ffctl: {}", err.message());
-            ExitCode::FAILURE
-        }
-    }
+pub(crate) fn report(result: firefly_error::Result<()>) -> ExitCode {
+    firefly_error::report("ffctl", result)
 }

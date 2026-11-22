@@ -1,5 +1,6 @@
 //! 原生 aarch64 Debian 构建；`v4l2-sys-mit` 的 bindgen 需要 `libclang-dev`。
 
+use firefly_error::{Error, ErrorKind, IoResultExt, Result};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -12,13 +13,13 @@ const TOOLCHAIN: &str = "1.100.0";
 const MEMORY: &str = "8G";
 const BUILDER_IMAGE: &str = "firefly-board-builder";
 
-pub fn build(root: &Path, apps: &[&str], with_unpacker: bool) -> Result<(), String> {
+pub fn build(root: &Path, apps: &[&str], with_unpacker: bool) -> Result<()> {
     let uid = id("-u")?;
     let gid = id("-g")?;
     let cache = root.join("target/container");
     for name in ["cargo", "home", "cache", "tmp"] {
         let path = cache.join(name);
-        fs::create_dir_all(&path).map_err(|error| format!("create {}: {error}", path.display()))?;
+        fs::create_dir_all(&path).at_path("create", &path)?;
     }
 
     let image = builder_tag();
@@ -69,13 +70,16 @@ pub fn build(root: &Path, apps: &[&str], with_unpacker: bool) -> Result<(), Stri
     }
 
     let status = command.status().map_err(|error| {
-        format!(
-            "failed to run container: {error}；安装 Apple container 并运行 container system start"
-        )
+        Error::from(error)
+            .with_operation("run container")
+            .with_context("hint", "安装 Apple container 并运行 container system start")
     })?;
     if !status.success() {
-        return Err(format!(
-            "container build failed: {status}；若提示 XPC 连接失败，先运行 container system start"
+        return Err(Error::new(
+            ErrorKind::Unavailable,
+            format!(
+                "container build failed: {status}；若提示 XPC 连接失败，先运行 container system start"
+            ),
         ));
     }
     Ok(())
@@ -90,11 +94,11 @@ fn builder_tag() -> String {
 }
 
 /// 生成并（首次）构建构建镜像：基础镜像 + `libclang-dev`。
-fn ensure_builder_image(cache: &Path, image: &str) -> Result<(), String> {
+fn ensure_builder_image(cache: &Path, image: &str) -> Result<()> {
     let inspect = Command::new("container")
         .args(["image", "inspect", image])
         .output()
-        .map_err(|error| format!("failed to run container: {error}"))?;
+        .map_err(|error| Error::from(error).with_operation("failed to run container"))?;
     if inspect.status.success() {
         return Ok(());
     }
@@ -103,30 +107,33 @@ fn ensure_builder_image(cache: &Path, image: &str) -> Result<(), String> {
     let recipe = format!(
         "FROM {IMAGE}\nRUN apt-get update && apt-get install -y --no-install-recommends libclang-dev && rm -rf /var/lib/apt/lists/*\n"
     );
-    fs::write(&containerfile, recipe)
-        .map_err(|error| format!("write {}: {error}", containerfile.display()))?;
+    fs::write(&containerfile, recipe).at_path("write", &containerfile)?;
     println!("构建板载构建镜像 {image}（首次需要下载 libclang）");
     let status = Command::new("container")
         .args(["build", "--arch", "arm64", "--tag", image, "--file"])
         .arg(&containerfile)
         .arg(cache)
         .status()
-        .map_err(|error| format!("failed to run container build: {error}"))?;
+        .map_err(|error| Error::from(error).with_operation("failed to run container build"))?;
     if !status.success() {
-        return Err(format!(
-            "container build failed: {status}；构建镜像需要能访问 Debian 软件源"
+        return Err(Error::new(
+            ErrorKind::Unavailable,
+            format!("container build failed: {status}；构建镜像需要能访问 Debian 软件源"),
         ));
     }
     Ok(())
 }
 
-fn id(flag: &str) -> Result<String, String> {
+fn id(flag: &str) -> Result<String> {
     let output = Command::new("id")
         .arg(flag)
         .output()
-        .map_err(|error| format!("failed to run id: {error}"))?;
+        .map_err(|error| Error::from(error).with_operation("failed to run id"))?;
     if !output.status.success() {
-        return Err(format!("id {flag} failed: {}", output.status));
+        return Err(Error::new(
+            ErrorKind::Unavailable,
+            format!("id {flag} failed: {}", output.status),
+        ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }

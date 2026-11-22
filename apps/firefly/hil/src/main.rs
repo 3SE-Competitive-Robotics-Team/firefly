@@ -23,22 +23,15 @@ struct Arguments {
 }
 
 fn main() -> ExitCode {
-    match run() {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("hil: {error}");
-            ExitCode::FAILURE
-        }
-    }
+    firefly_error::report("hil", run())
 }
 
-fn run() -> Result<(), String> {
+fn run() -> firefly_error::Result<()> {
     let args = Arguments::parse();
     let path = args.config.unwrap_or_else(config::default_config);
     let config = firefly_config::startup::<Config>(&path, firefly_observability::init, |config| {
         config.validate()
-    })
-    .map_err(|error| error.to_string())?;
+    })?;
     if args.probe {
         return host::probe(&config);
     }

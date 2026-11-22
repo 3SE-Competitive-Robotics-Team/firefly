@@ -19,19 +19,27 @@ const HOST_HEARTBEAT: Duration = Duration::from_millis(500);
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
-pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+pub fn run() -> firefly_error::Result<()> {
     firefly_observability::init();
     let _guard: SignalGuard = SignalHandler::register_multiple_signals(
         &vec![FetchableSignal::Interrupt, FetchableSignal::Terminate],
         &|_signal| RUNNING.store(false, Ordering::Relaxed),
-    )?;
+    )
+    .map_err(|e| {
+        firefly_error::Error::caused_by(
+            firefly_error::ErrorKind::Internal,
+            "register shutdown signals",
+            e,
+        )
+    })?;
     let node = create_node()?;
     let log_ipc = firefly_observability::init_ipc(&node, "camera");
     let mut ingress = SensorIngress::open(&node, "Firefly")?;
     let path = endpoint_file_at(HIL_INSTANCE, DOWNLINK_ENDPOINT)?;
     let file = OpenOptions::new().read(true).open(&path)?;
-    let flags = OFlag::from_bits_truncate(fcntl(&file, FcntlArg::F_GETFL)?);
-    fcntl(&file, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK))?;
+    let flags =
+        OFlag::from_bits_truncate(fcntl(&file, FcntlArg::F_GETFL).map_err(std::io::Error::from)?);
+    fcntl(&file, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK)).map_err(std::io::Error::from)?;
     log::info!("HIL 传感器端点 {}", path.display());
 
     let mut reader = FrameReader::new(file);
@@ -55,7 +63,15 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 serde_json::from_slice(&bytes)
                     .map_err(|e| e.to_string())
-                    .and_then(|request| firefly_mission::call(&request).map_err(|e| e.to_string()))
+                    .and_then(|request| {
+                        firefly_mission::call(&request).map_err(|e| {
+                            if e.kind() == firefly_error::ErrorKind::Rejected {
+                                e.message().to_owned()
+                            } else {
+                                e.to_string()
+                            }
+                        })
+                    })
             };
             if let Ok(mut body) = serde_json::to_vec(&reply) {
                 if body.len() > firefly_hil::protocol::MISSION_BODY_MAX {

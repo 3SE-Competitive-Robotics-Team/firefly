@@ -14,9 +14,9 @@ impl<'a> CentralAbsoluteAdapter<'a> {
     pub fn new(
         bearing_vectors: &'a [Vector3<f64>],
         points: &'a [Vector3<f64>],
-    ) -> Result<Self, String> {
+    ) -> firefly_error::Result<Self> {
         if points.len() != bearing_vectors.len() {
-            return Err("adapter storage shape violates correspondence bounds".into());
+            return Err(crate::invalid_correspondences());
         }
         Ok(Self {
             points,

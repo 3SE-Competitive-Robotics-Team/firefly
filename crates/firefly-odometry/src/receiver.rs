@@ -22,7 +22,7 @@ struct Shared {
     input: StateInput,
     history: VecDeque<OdomMessage>,
     trace: TraceContext,
-    error: Option<String>,
+    error: Option<Error>,
 }
 
 /// 同一进程内按测量时间排列的有界里程计历史。
@@ -43,7 +43,7 @@ impl OdometryHistory {
             .lock()
             .map_err(|_| internal("odometry state poisoned"))?;
         if let Some(error) = &state.error {
-            return Err(internal(error.clone()));
+            return Err(error.clone());
         }
         if self.stop.load(Ordering::Relaxed) || state.input.current(Instant::now()).is_none() {
             return Ok(VecDeque::new());
@@ -112,22 +112,21 @@ impl OdometryReceiver {
                 if let Ok(mut state) = state.lock() {
                     state.input.stop();
                     if let Err(error) = result {
-                        state.error = Some(error.to_string());
-                        let _ = ready.send(Err(error.to_string()));
+                        state.error = Some(error.clone());
                         log::error!("odometry receiver: {error}");
+                        let _ = ready.send(Err(error));
                     }
                 }
             })
-            .map_err(|e| internal(e.to_string()))?;
-        let mut receiver = Self {
+            .map_err(|e| Error::from(e).with_operation("spawn odometry receiver"))?;
+        let receiver = Self {
             shared,
             stop,
             thread: Some(thread),
         };
-        if let Err(error) = startup.recv().map_err(|e| e.to_string()).and_then(|v| v) {
-            receiver.shutdown();
-            return Err(internal(error).with_operation("start odometry receiver"));
-        }
+        startup.recv().map_err(|e| {
+            Error::caused_by(ErrorKind::Unavailable, "start odometry receiver", e)
+        })??;
         Ok(receiver)
     }
 
@@ -141,7 +140,7 @@ impl OdometryReceiver {
             .lock()
             .map_err(|_| internal("odometry state poisoned"))?;
         if let Some(error) = &state.error {
-            return Err(internal(error.clone()));
+            return Err(error.clone());
         }
         if self.terminated() {
             state.input.stop();

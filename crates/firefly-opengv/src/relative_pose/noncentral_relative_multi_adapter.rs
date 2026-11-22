@@ -23,7 +23,7 @@ impl<'a> NoncentralRelativeMultiAdapter<'a> {
         bearing_vectors2: Vec<std::sync::Arc<Vec<Vector3<f64>>>>,
         cam_offsets: &'a [Vector3<f64>],
         cam_rotations: &'a [Matrix3<f64>],
-    ) -> Result<Self, String> {
+    ) -> firefly_error::Result<Self> {
         if bearing_vectors1.len() != bearing_vectors2.len()
             || bearing_vectors1
                 .iter()
@@ -32,7 +32,7 @@ impl<'a> NoncentralRelativeMultiAdapter<'a> {
             || bearing_vectors2.len() != cam_offsets.len()
             || cam_offsets.len() != cam_rotations.len()
         {
-            return Err("adapter storage shape violates correspondence bounds".into());
+            return Err(crate::invalid_correspondences());
         }
 
         let mut offsets = Vec::new();

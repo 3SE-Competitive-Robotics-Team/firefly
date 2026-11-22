@@ -212,7 +212,7 @@ impl App {
         Ok(Self {
             fsm: ReplanFsm::new(manager),
             solver: PlanningWorker::new()
-                .map_err(|e| Error::new(ErrorKind::Internal, format!("创建求解线程失败: {e}")))?,
+                .map_err(|e| Error::caused_by(ErrorKind::Internal, "创建求解线程失败", e))?,
             output,
             published_trajectory: 0,
             republish_trajectory: false,
@@ -630,13 +630,13 @@ impl App {
         let mut last_visualization = Instant::now();
         let waitset = WaitSetBuilder::new()
             .create::<ipc::Service>()
-            .map_err(|e| Error::new(ErrorKind::Internal, format!("创建 WaitSet 失败: {e:?}")))?;
+            .map_err(|e| Error::caused_by(ErrorKind::Internal, "创建 WaitSet 失败", e))?;
         let tick_guard = waitset
             .attach_interval(LOOP_PERIOD)
-            .map_err(|e| Error::new(ErrorKind::Internal, format!("挂载节拍定时器失败: {e:?}")))?;
+            .map_err(|e| Error::caused_by(ErrorKind::Internal, "挂载节拍定时器失败", e))?;
         let safety_guard = waitset
             .attach_interval(Duration::from_millis(50))
-            .map_err(|e| Error::new(ErrorKind::Internal, format!("挂载安全定时器失败: {e:?}")))?;
+            .map_err(|e| Error::caused_by(ErrorKind::Internal, "挂载安全定时器失败", e))?;
         let on_tick = |attachment_id: WaitSetAttachmentId<ipc::Service>| {
             if attachment_id.has_event_from(&safety_guard) {
                 let started = Instant::now();
@@ -694,9 +694,10 @@ impl App {
             }
             Ok(_) => {}
             Err(e) => {
-                return Err(Error::new(
+                return Err(Error::caused_by(
                     ErrorKind::Internal,
-                    format!("WaitSet 事件等待失败: {e:?}"),
+                    "WaitSet 事件等待失败",
+                    e,
                 ));
             }
         }
@@ -827,59 +828,47 @@ fn log_slow_stage(stage: &str, started: Instant) {
     }
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let args = Arguments::parse();
     let (Ok(start), Ok(goal)) = (
         args.start.map(TryInto::try_into).transpose(),
         args.goal.map(TryInto::try_into).transpose(),
     ) else {
         eprintln!("--start 和 --goal 各接受一组 X Y Z 坐标");
-        std::process::exit(2);
+        return std::process::ExitCode::from(2);
     };
-    if args.mandatory_stop {
+    let result = run(args.config, args.mandatory_stop, start, goal);
+    firefly_observability::flush();
+    result.unwrap_or_else(|e| firefly_error::report("planner", Err(e)))
+}
+
+fn run(
+    config: Option<PathBuf>,
+    mandatory_stop: bool,
+    start: Option<[f64; 3]>,
+    goal: Option<[f64; 3]>,
+) -> Result<std::process::ExitCode> {
+    if mandatory_stop {
         init_observability();
-        if let Err(e) = emit_mandatory_stop() {
+        let result = emit_mandatory_stop()
+            .inspect(|()| log::info!("已发布强制停止指令到 {MANDATORY_STOP_TOPIC}"));
+        return Ok(firefly_error::report_with(result, |e| {
             log::error!("强制停止指令发布失败：{e}");
-            firefly_observability::flush();
-            std::process::exit(1);
-        }
-        log::info!("已发布强制停止指令到 {MANDATORY_STOP_TOPIC}");
-        firefly_observability::flush();
-        return;
+        }));
     }
-    let toml_cfg = match firefly_config::startup::<config::PlannerToml>(
-        args.config.unwrap_or_else(default_config),
+    let cfg = firefly_config::startup::<config::PlannerToml>(
+        config.unwrap_or_else(default_config),
         init_observability,
         |_| Ok(()),
-    ) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("加载配置失败：{e}");
-            std::process::exit(1);
-        }
-    };
-    match App::new(
-        toml_cfg.config,
-        toml_cfg.mapping,
-        toml_cfg.manager,
+    )?;
+    let mut app = App::new(
+        cfg.config,
+        cfg.mapping,
+        cfg.manager,
         start.unwrap_or([0.0; 3]),
         goal,
-    ) {
-        Ok(mut app) => {
-            if let Err(e) = app.run() {
-                log::error!("planner 失败：{e}");
-                firefly_observability::pump_log_ipc(&app.log_ipc);
-                firefly_observability::flush();
-                drop(app);
-                std::process::exit(1);
-            }
-            firefly_observability::pump_log_ipc(&app.log_ipc);
-        }
-        Err(e) => {
-            eprintln!("初始化失败：{e}");
-            firefly_observability::flush();
-            std::process::exit(1);
-        }
-    }
-    firefly_observability::flush();
+    )?;
+    let code = firefly_error::report_with(app.run(), |error| log::error!("planner 失败：{error}"));
+    firefly_observability::pump_log_ipc(&app.log_ipc);
+    Ok(code)
 }

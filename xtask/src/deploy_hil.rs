@@ -1,5 +1,6 @@
 //! HIL 切换后 ADB 不可用；以 `hil --check` 对单个厂商接口及两个端点的检查确认就绪。
 
+use firefly_error::{Error, ErrorKind, Result};
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -11,7 +12,7 @@ use crate::target;
 const ENUMERATION_TIMEOUT: Duration = Duration::from_secs(20);
 const MANIFEST: &str = "processes-hil.toml";
 
-pub fn run(device: &str) -> Result<(), String> {
+pub fn run(device: &str) -> Result<()> {
     deploy::deploy(device)?;
     ensure_hil_processes(device)?;
     build_host_bridge()?;
@@ -26,7 +27,7 @@ pub fn run(device: &str) -> Result<(), String> {
 }
 
 /// `deploy` 会把 `configs/*.toml` 一起发布，这里只确认 HIL 清单确实在位。
-fn ensure_hil_processes(device: &str) -> Result<(), String> {
+fn ensure_hil_processes(device: &str) -> Result<()> {
     let output = deploy::adb_output(
         device,
         &[
@@ -35,24 +36,30 @@ fn ensure_hil_processes(device: &str) -> Result<(), String> {
         ],
     )?;
     if !output.contains("HIL_PROCESSES_OK") {
-        return Err(format!("板上缺少 configs/{MANIFEST}；检查 deploy 包"));
+        return Err(Error::new(
+            ErrorKind::NotFound,
+            format!("板上缺少 configs/{MANIFEST}；检查 deploy 包"),
+        ));
     }
     Ok(())
 }
 
-fn build_host_bridge() -> Result<(), String> {
+fn build_host_bridge() -> Result<()> {
     let status = Command::new("cargo")
         .current_dir(target::workspace_root())
         .args(["build", "--release", "-p", "hil"])
         .status()
-        .map_err(|error| format!("failed to run cargo: {error}"))?;
+        .map_err(|error| Error::from(error).with_operation("failed to run cargo"))?;
     if !status.success() {
-        return Err(format!("cargo build -p hil failed: {status}"));
+        return Err(Error::new(
+            ErrorKind::Unavailable,
+            format!("cargo build -p hil failed: {status}"),
+        ));
     }
     Ok(())
 }
 
-fn wait_for_enumeration() -> Result<(), String> {
+fn wait_for_enumeration() -> Result<()> {
     let probe = target::workspace_root().join("target/release/hil");
     let deadline = Instant::now() + ENUMERATION_TIMEOUT;
     while Instant::now() < deadline {
@@ -71,8 +78,11 @@ fn wait_for_enumeration() -> Result<(), String> {
         }
         thread::sleep(Duration::from_millis(500));
     }
-    Err(format!(
-        "HIL 设备未在 {}s 内枚举；看门狗会在 60s 无数据后恢复 adb，届时用 journalctl -b -t firefly-hil-gadget 查看切换日志",
-        ENUMERATION_TIMEOUT.as_secs()
+    Err(Error::new(
+        ErrorKind::Timeout,
+        format!(
+            "HIL 设备未在 {}s 内枚举；看门狗会在 60s 无数据后恢复 adb，届时用 journalctl -b -t firefly-hil-gadget 查看切换日志",
+            ENUMERATION_TIMEOUT.as_secs()
+        ),
     ))
 }

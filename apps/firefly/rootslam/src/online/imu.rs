@@ -223,10 +223,13 @@ impl ImuAdapter for Adapter {
     }
 
     fn predict(&mut self, sample: ImuSample) -> Result<Option<Sample>> {
-        let Some(prediction) = self
-            .predictor
-            .imu(sample)
-            .map_err(|e| error(format!("IMU prediction: {e:?}")))?
+        let Some(prediction) = self.predictor.imu(sample).map_err(|e| {
+            firefly_error::Error::caused_by(
+                firefly_error::ErrorKind::InvalidData,
+                "predict from IMU measurements",
+                e,
+            )
+        })?
         else {
             return Ok(None);
         };

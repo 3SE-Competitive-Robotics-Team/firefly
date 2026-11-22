@@ -19,14 +19,14 @@ impl CentralRelativeMultiAdapter {
     pub fn new(
         bearing_vectors1: Vec<std::sync::Arc<Vec<Vector3<f64>>>>,
         bearing_vectors2: Vec<std::sync::Arc<Vec<Vector3<f64>>>>,
-    ) -> Result<Self, String> {
+    ) -> firefly_error::Result<Self> {
         if bearing_vectors1.len() != bearing_vectors2.len()
             || bearing_vectors1
                 .iter()
                 .zip(&bearing_vectors2)
                 .any(|(a, b)| a.len() != b.len())
         {
-            return Err("adapter storage shape violates correspondence bounds".into());
+            return Err(crate::invalid_correspondences());
         }
 
         let mut offsets = Vec::new();

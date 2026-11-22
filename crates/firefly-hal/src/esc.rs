@@ -10,6 +10,8 @@ pub struct ThrustToDuty {
     max_thrust_n: f64,
 }
 
+use firefly_error::{Error, ErrorKind};
+
 impl ThrustToDuty {
     /// # Errors
     /// 周期为零、脉宽区间为空或超出周期、推力上限非正。
@@ -18,22 +20,27 @@ impl ThrustToDuty {
         min_duty_ns: u64,
         max_duty_ns: u64,
         max_thrust_n: f64,
-    ) -> Result<Self, String> {
+    ) -> firefly_error::Result<Self> {
         if period_ns == 0 {
-            return Err("PWM 周期必须为正".to_owned());
+            return Err(Error::new(ErrorKind::InvalidArgument, "PWM 周期必须为正"));
         }
         if min_duty_ns >= max_duty_ns {
-            return Err(format!(
-                "PWM 脉宽区间为空：min={min_duty_ns} ns，max={max_duty_ns} ns"
+            return Err(Error::new(
+                ErrorKind::InvalidArgument,
+                format!("PWM 脉宽区间为空：min={min_duty_ns} ns，max={max_duty_ns} ns"),
             ));
         }
         if max_duty_ns > period_ns {
-            return Err(format!(
-                "PWM 满推力脉宽 {max_duty_ns} ns 超过周期 {period_ns} ns"
+            return Err(Error::new(
+                ErrorKind::InvalidArgument,
+                format!("PWM 满推力脉宽 {max_duty_ns} ns 超过周期 {period_ns} ns"),
             ));
         }
         if !max_thrust_n.is_finite() || max_thrust_n <= 0.0 {
-            return Err(format!("单电机推力上限必须为正：{max_thrust_n}"));
+            return Err(Error::new(
+                ErrorKind::InvalidArgument,
+                format!("单电机推力上限必须为正：{max_thrust_n}"),
+            ));
         }
         Ok(Self {
             period_ns,

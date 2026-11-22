@@ -376,8 +376,7 @@ impl LoopDetector {
             .map(|pose| pose.rotation.to_rotation_matrix().into_inner())
             .collect();
         let mut adapter =
-            NoncentralAbsoluteAdapter::new(&rays, &cameras, &points, &offsets, &rotations)
-                .map_err(failure)?;
+            NoncentralAbsoluteAdapter::new(&rays, &cameras, &points, &offsets, &rotations)?;
         let backend = RustNumericalBackend;
         let problem = AbsolutePoseSacProblem::new(&mut adapter, Algorithm::Gp3p, &backend, false);
         let mut consensus = Ransac::new(

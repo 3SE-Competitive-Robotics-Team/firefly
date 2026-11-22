@@ -12,15 +12,7 @@ use protocol::Request;
 
 pub(crate) const SOCKET: &str = "/run/firefly/supervisor.sock";
 
-pub(crate) fn report(result: Result<(), String>) -> ExitCode {
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("ffctl: {error}");
-            ExitCode::FAILURE
-        }
-    }
-}
+pub(crate) use crate::ipc::report;
 
 pub(crate) fn request(request: &Request) -> ExitCode {
     match client::send(request) {
@@ -28,15 +20,19 @@ pub(crate) fn request(request: &Request) -> ExitCode {
             println!("{}", response.message);
             ExitCode::SUCCESS
         }
-        Ok(response) => {
-            eprintln!("ffctl: {}", response.message);
-            ExitCode::FAILURE
-        }
+        Ok(response) => report(Err(firefly_error::Error::new(
+            firefly_error::ErrorKind::Unavailable,
+            response.message,
+        ))),
         Err(error) => report(Err(error)),
     }
 }
 
-pub(crate) fn set_autostart(path: &Path, names: &[String], autostart: bool) -> Result<(), String> {
+pub(crate) fn set_autostart(
+    path: &Path,
+    names: &[String],
+    autostart: bool,
+) -> firefly_error::Result<()> {
     let mut config = config::Config::load(path)?;
     let changed = config.set_autostart(names, autostart)?;
     config.save(path)?;

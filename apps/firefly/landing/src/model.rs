@@ -134,11 +134,11 @@ impl Model {
                 let session = Session::builder(environment)
                     .map_err(|e| external("landing.session.create", e))?
                     .with_intra_threads(1)
-                    .map_err(|e| external("landing.session.configure", e))?
+                    .map_err(|e| external("landing.session.configure", ort::Error::<()>::from(e)))?
                     .with_intra_op_spinning(false)
-                    .map_err(|e| external("landing.session.configure", e))?
+                    .map_err(|e| external("landing.session.configure", ort::Error::<()>::from(e)))?
                     .with_auto_device(ort::session::builder::AutoDevicePolicy::PreferCPU)
-                    .map_err(|e| external("landing.session.configure", e))?
+                    .map_err(|e| external("landing.session.configure", ort::Error::<()>::from(e)))?
                     .commit_from_memory(&bytes)
                     .map_err(|e| external("landing.model.compile", e))?;
                 let input =
@@ -151,7 +151,7 @@ impl Model {
                 {
                     Engine::Viplite(Box::new(
                         firefly_viplite::Network::open(bytes, DOWN_WIDTH, DOWN_HEIGHT)
-                            .map_err(|e| external("landing.viplite.open", e))?,
+                            .map_err(|e| e.with_operation("landing.viplite.open"))?,
                     ))
                 }
                 #[cfg(not(target_os = "linux"))]
@@ -194,7 +194,7 @@ impl Model {
             Engine::Viplite(network) => {
                 let values = network
                     .run(gray)
-                    .map_err(|e| external("landing.viplite.run", e))?;
+                    .map_err(|e| e.with_operation("landing.viplite.run"))?;
                 decode_raw_detections(
                     &[1, 5, (values.len() / 5) as i64],
                     values,

@@ -11,6 +11,7 @@ from enum import Enum, auto
 from functools import partial
 from typing import Protocol
 
+import sys
 import time
 
 from firefly_workspace import startup
@@ -188,6 +189,17 @@ def decode_config(cfg: dict, *, scene_loader: Callable[[], str] = load_scene_nam
     if start_pos.shape != (3,) or not np.isfinite(start_pos).all():
         raise ValueError("start 必须是三个有限坐标值")
     return physics_period, imu_period, pose_period, start_pos, scene_name
+
+
+def cli(argv: Sequence[str] | None = None, *, publish_plant_state: bool = True,
+        seed: int | None = None) -> int:
+    """向启动器报告仿真进程的退出状态。"""
+    try:
+        main(argv, publish_plant_state=publish_plant_state, seed=seed)
+    except (OSError, ValueError, RuntimeError) as error:
+        print(f"firefly-sim: {error}", *getattr(error, "__notes__", ()), sep="\n  ", file=sys.stderr)
+        return 1
+    return 0
 
 
 def main(argv: Sequence[str] | None = None, *, env_factory: EnvironmentFactory = DroneEnv,

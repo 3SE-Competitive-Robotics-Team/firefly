@@ -45,6 +45,20 @@ pub enum PropagationError {
     InvalidMeasurements,
 }
 
+impl std::fmt::Display for PropagationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::MissingMeasurements => "no IMU measurements",
+            Self::StartNotCovered => "IMU samples do not cover the start time",
+            Self::EndNotCovered => "IMU samples do not cover the end time",
+            Self::NoIntegrationSteps => "no IMU integration steps",
+            Self::InvalidMeasurements => "invalid IMU measurements",
+        })
+    }
+}
+
+impl std::error::Error for PropagationError {}
+
 /// Propagates one state using the OKVIS2-X motion-only preintegration path.
 ///
 /// `measurements` must be time ordered and cover both `state.timestamp_ns`

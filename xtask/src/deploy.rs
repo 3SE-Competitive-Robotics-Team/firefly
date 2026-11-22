@@ -1,6 +1,7 @@
 //! 部署替换 bin/configs/models，保留 logs。安装成功后启动服务，以 supervisor 应答确认就绪。
 //! 板载 legacy adb shell 的退出码反映传输结果，远端步骤通过输出标记确认成功。
 
+use firefly_error::{Error, ErrorKind, IoResultExt, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -19,14 +20,14 @@ const BOARD_MODELS: &[&str] = &[
     "yolo26n-depth/yolo26n-depth-320-int8.nb",
 ];
 
-pub fn run(device: &str) -> Result<(), String> {
+pub fn run(device: &str) -> Result<()> {
     deploy(device)?;
     println!("部署完成");
     Ok(())
 }
 
 /// 构建并部署机载 release，最后拉起 `firefly.service` 并确认 supervisor 就绪。
-pub(crate) fn deploy(device: &str) -> Result<(), String> {
+pub(crate) fn deploy(device: &str) -> Result<()> {
     release::build(Target::Board)?;
     let package = package()?;
     push(device, &package)?;
@@ -34,16 +35,16 @@ pub(crate) fn deploy(device: &str) -> Result<(), String> {
 }
 
 /// 在板上执行一条 shell 命令；退出码只反映传输结果。
-pub(crate) fn shell(device: &str, command: &str) -> Result<(), String> {
+pub(crate) fn shell(device: &str, command: &str) -> Result<()> {
     adb(device, &["shell", command])
 }
 
 /// 捕获远端输出（板载 `adb shell` 不传递远端退出码）。
-pub(crate) fn adb_output(device: &str, args: &[&str]) -> Result<String, String> {
+pub(crate) fn adb_output(device: &str, args: &[&str]) -> Result<String> {
     adb_output_inner(device, args)
 }
 
-fn package() -> Result<PathBuf, String> {
+fn package() -> Result<PathBuf> {
     let root = target::workspace_root();
     let release_dir = Target::Board.release_dir(&root);
     let mut entries = Vec::new();
@@ -51,9 +52,12 @@ fn package() -> Result<PathBuf, String> {
     for app in Target::Board.apps() {
         let source = release_dir.join(app);
         if !source.is_file() {
-            return Err(format!(
-                "missing {}: run cargo xtask release --target board",
-                source.display()
+            return Err(Error::new(
+                ErrorKind::NotFound,
+                format!(
+                    "missing {}: run cargo xtask release --target board",
+                    source.display()
+                ),
             ));
         }
         entries.push(Entry {
@@ -65,10 +69,10 @@ fn package() -> Result<PathBuf, String> {
 
     let config_dir = root.join("configs");
     let mut configs = fs::read_dir(&config_dir)
-        .map_err(|error| format!("read {}: {error}", config_dir.display()))?
+        .at_path("read", &config_dir)?
         .map(|item| item.map(|entry| entry.path()))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("read {}: {error}", config_dir.display()))?;
+        .collect::<std::io::Result<Vec<_>>>()
+        .at_path("read", &config_dir)?;
     configs.sort();
     for config in configs {
         let Some(name) = config.file_name() else {
@@ -102,9 +106,12 @@ fn package() -> Result<PathBuf, String> {
     for model in BOARD_MODELS {
         let source = root.join("models").join(model);
         if !source.is_file() {
-            return Err(format!(
-                "missing {}; install the quantized board model before deployment",
-                source.display()
+            return Err(Error::new(
+                ErrorKind::NotFound,
+                format!(
+                    "missing {}; install the quantized board model before deployment",
+                    source.display()
+                ),
             ));
         }
         entries.push(Entry {
@@ -116,11 +123,9 @@ fn package() -> Result<PathBuf, String> {
 
     let package = root.join(PACKAGE);
     if let Some(parent) = package.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("create {}: {error}", parent.display()))?;
+        fs::create_dir_all(parent).at_path("create", parent)?;
     }
-    let bytes = archive::write(&package, &entries)
-        .map_err(|error| format!("write {}: {error}", package.display()))?;
+    let bytes = archive::write(&package, &entries).at_path("write", &package)?;
     println!(
         "package {}（{:.1} MiB，{} 个文件）",
         package.display(),
@@ -130,7 +135,7 @@ fn package() -> Result<PathBuf, String> {
     Ok(package)
 }
 
-fn push(device: &str, package: &Path) -> Result<(), String> {
+fn push(device: &str, package: &Path) -> Result<()> {
     check_device(device)?;
     let unpacker = Target::Board
         .release_dir(&target::workspace_root())
@@ -151,9 +156,7 @@ fn push(device: &str, package: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn prepare_destination_with(
-    mut output: impl FnMut(&[&str]) -> Result<String, String>,
-) -> Result<(), String> {
+fn prepare_destination_with(mut output: impl FnMut(&[&str]) -> Result<String>) -> Result<()> {
     remote_step_with("systemctl stop firefly", &mut output)?;
     remote_step_with(
         &format!("rm -rf {DESTINATION}/bin {DESTINATION}/configs {DESTINATION}/models"),
@@ -161,19 +164,22 @@ fn prepare_destination_with(
     )
 }
 
-fn remote_step(device: &str, command: &str) -> Result<(), String> {
+fn remote_step(device: &str, command: &str) -> Result<()> {
     remote_step_with(command, |args| adb_output(device, args))
 }
 
 fn remote_step_with(
     command: &str,
-    mut output: impl FnMut(&[&str]) -> Result<String, String>,
-) -> Result<(), String> {
+    mut output: impl FnMut(&[&str]) -> Result<String>,
+) -> Result<()> {
     const COMPLETE: &str = "FIREFLY_STEP_COMPLETE";
     let script = format!("({command}) && echo {COMPLETE}");
     let result = output(&["shell", &script])?;
     if !has_marker(&result, COMPLETE) {
-        return Err(format!("远端步骤未完成（{command}）：\n{result}"));
+        return Err(Error::new(
+            ErrorKind::Unavailable,
+            format!("远端步骤未完成（{command}）：\n{result}"),
+        ));
     }
     Ok(())
 }
@@ -182,19 +188,22 @@ fn has_marker(output: &str, marker: &str) -> bool {
     output.lines().any(|line| line.trim() == marker)
 }
 
-fn unpack_with(mut output: impl FnMut(&[&str]) -> Result<String, String>) -> Result<(), String> {
+fn unpack_with(mut output: impl FnMut(&[&str]) -> Result<String>) -> Result<()> {
     const COMPLETE: &str = "FIREFLY_UNPACK_COMPLETE";
     let command =
         format!("{REMOTE_UNPACKER} unpack {REMOTE_PACKAGE} {DESTINATION} && echo {COMPLETE}");
     let result = output(&["shell", &command])?;
     if !has_marker(&result, COMPLETE) {
-        return Err(format!("远端解包未完成：\n{result}"));
+        return Err(Error::new(
+            ErrorKind::Unavailable,
+            format!("远端解包未完成：\n{result}"),
+        ));
     }
     Ok(())
 }
 
 /// 检查机载清单中的每个程序在部署路径上都有执行权限。
-fn check_unpacked(device: &str) -> Result<(), String> {
+fn check_unpacked(device: &str) -> Result<()> {
     let expected = Target::Board
         .apps()
         .iter()
@@ -211,11 +220,14 @@ fn check_unpacked(device: &str) -> Result<(), String> {
     if missing.trim().is_empty() {
         Ok(())
     } else {
-        Err(format!("解包后缺少可执行文件：\n{missing}"))
+        Err(Error::new(
+            ErrorKind::NotFound,
+            format!("解包后缺少可执行文件：\n{missing}"),
+        ))
     }
 }
 
-fn start(device: &str) -> Result<(), String> {
+fn start(device: &str) -> Result<()> {
     remote_step(
         device,
         concat!(
@@ -240,8 +252,9 @@ fn start(device: &str) -> Result<(), String> {
             device,
             &["shell", "systemctl status firefly --no-pager -l | head -20"],
         )?;
-        return Err(format!(
-            "firefly.service 启动后 supervisor 或任务服务未应答：\n{status}"
+        return Err(Error::new(
+            ErrorKind::Unavailable,
+            format!("firefly.service 启动后 supervisor 或任务服务未应答：\n{status}"),
         ));
     }
     Ok(())
@@ -249,7 +262,7 @@ fn start(device: &str) -> Result<(), String> {
 
 /// 把已部署的二进制软链到 `/usr/local/bin`，让任意目录、非交互 shell 都能直接调用。
 /// 板上 `PATH` 默认包含该目录，因此不修改镜像的 shell 配置。
-fn link(device: &str) -> Result<(), String> {
+fn link(device: &str) -> Result<()> {
     let mut commands = vec![format!(
         "for app in fc imu; do path=/usr/local/bin/\"$app\"; \
          if [ -L \"$path\" ] && [ ! -e \"$path\" ] && \
@@ -264,45 +277,54 @@ fn link(device: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn check_device(device: &str) -> Result<(), String> {
+fn check_device(device: &str) -> Result<()> {
     let output = Command::new("adb")
         .args(["-s", device, "get-state"])
         .output()
-        .map_err(|error| format!("failed to run adb: {error}"))?;
+        .map_err(|error| Error::from(error).with_operation("failed to run adb"))?;
     let state = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if !output.status.success() || state != "device" {
-        return Err(format!(
-            "adb device {device} is not ready（state: {state}）；先确认 adb devices 能看到它"
+        return Err(Error::new(
+            ErrorKind::Unavailable,
+            format!(
+                "adb device {device} is not ready（state: {state}）；先确认 adb devices 能看到它"
+            ),
         ));
     }
     Ok(())
 }
 
-fn adb_output_inner(device: &str, args: &[&str]) -> Result<String, String> {
+fn adb_output_inner(device: &str, args: &[&str]) -> Result<String> {
     let output = Command::new("adb")
         .args(["-s", device])
         .args(args)
         .output()
-        .map_err(|error| format!("failed to run adb: {error}"))?;
+        .map_err(|error| Error::from(error).with_operation("failed to run adb"))?;
     if !output.status.success() {
-        return Err(format!(
-            "adb {} failed: {}\n{}",
-            args.join(" "),
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
+        return Err(Error::new(
+            ErrorKind::Unavailable,
+            format!(
+                "adb {} failed: {}\n{}",
+                args.join(" "),
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            ),
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn adb(device: &str, args: &[&str]) -> Result<(), String> {
+fn adb(device: &str, args: &[&str]) -> Result<()> {
     let status = Command::new("adb")
         .args(["-s", device])
         .args(args)
         .status()
-        .map_err(|error| format!("failed to run adb: {error}"))?;
+        .map_err(|error| Error::from(error).with_operation("failed to run adb"))?;
     if !status.success() {
-        return Err(format!("adb {} failed: {status}", args.join(" ")));
+        return Err(Error::new(
+            ErrorKind::Unavailable,
+            format!("adb {} failed: {status}", args.join(" ")),
+        ));
     }
     Ok(())
 }
@@ -363,7 +385,7 @@ mod tests {
             Ok(format!("bin/fc\n{diagnostic}\n"))
         })
         .unwrap_err();
-        assert!(error.contains(diagnostic), "{error}");
+        assert!(error.message().contains(diagnostic), "{error}");
         assert!(unpack_with(|_| Ok("unpacked\nFIREFLY_UNPACK_COMPLETE\n".into())).is_ok());
     }
 }

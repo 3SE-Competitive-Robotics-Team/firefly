@@ -1,5 +1,6 @@
 //! 进程清单只在启动时读取；`enable`/`disable` 的改动由下一次 supervisor 启动生效。
 
+use firefly_error::{Error, ErrorKind, IoResultExt, Result};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -85,7 +86,7 @@ impl Lifecycle {
     }
 }
 
-pub(crate) fn run(path: &Path) -> Result<(), String> {
+pub(crate) fn run(path: &Path) -> Result<()> {
     let archive = Run::board()
         .map_err(|error| eprintln!("ffctl: boot archive: {error}"))
         .ok();
@@ -94,7 +95,7 @@ pub(crate) fn run(path: &Path) -> Result<(), String> {
         && let Some(run) = archive
     {
         let logged = Output::new(run, "ffctl").and_then(|output| {
-            output.line(std::process::id(), "stderr", reason.as_bytes());
+            output.line(std::process::id(), "stderr", reason.to_string().as_bytes());
             output.finish()
         });
         if let Err(error) = logged {
@@ -104,12 +105,12 @@ pub(crate) fn run(path: &Path) -> Result<(), String> {
     result
 }
 
-fn supervise(path: &Path, archive: Option<&Run>) -> Result<(), String> {
+fn supervise(path: &Path, archive: Option<&Run>) -> Result<()> {
     let config = Config::load(path)?;
     let shutdown = Arc::new(AtomicBool::new(false));
     for signal in [SIGTERM, SIGINT] {
         flag::register(signal, Arc::clone(&shutdown))
-            .map_err(|error| format!("安装信号处理: {error}"))?;
+            .map_err(|error| Error::from(error).with_operation("安装信号处理"))?;
     }
 
     let listener = bind_socket()?;
@@ -276,15 +277,15 @@ fn handle(request: Request, managed: &mut [Managed]) -> Response {
             message,
             processes: statuses(managed),
         },
-        Err(message) => Response {
+        Err(error) => Response {
             ok: false,
-            message,
+            message: error.to_string(),
             processes: statuses(managed),
         },
     }
 }
 
-fn start(managed: &mut [Managed], names: &[String]) -> Result<String, String> {
+fn start(managed: &mut [Managed], names: &[String]) -> Result<String> {
     let mut indices = resolve_indices(managed, names, Defaults::Autostart)?;
     indices.sort_unstable();
     let mut started = Vec::new();
@@ -292,17 +293,13 @@ fn start(managed: &mut [Managed], names: &[String]) -> Result<String, String> {
         if managed[index].lifecycle.child().is_some() {
             continue;
         }
-        match spawn(&managed[index]) {
-            Ok(child) => {
-                managed[index].lifecycle = Lifecycle::Running {
-                    child,
-                    started_at: Instant::now(),
-                };
-                managed[index].restarts = 0;
-                started.push(managed[index].process.name.clone());
-            }
-            Err(error) => return Err(format!("{} 启动失败：{error}", managed[index].process.name)),
-        }
+        let child = spawn(&managed[index])?;
+        managed[index].lifecycle = Lifecycle::Running {
+            child,
+            started_at: Instant::now(),
+        };
+        managed[index].restarts = 0;
+        started.push(managed[index].process.name.clone());
     }
     if started.is_empty() {
         Ok("没有需要启动的进程".to_owned())
@@ -311,7 +308,7 @@ fn start(managed: &mut [Managed], names: &[String]) -> Result<String, String> {
     }
 }
 
-fn stop(managed: &mut [Managed], names: &[String]) -> Result<String, String> {
+fn stop(managed: &mut [Managed], names: &[String]) -> Result<String> {
     let mut indices = resolve_indices(managed, names, Defaults::All)?;
     indices.sort_unstable();
     let mut stopped = Vec::new();
@@ -328,7 +325,7 @@ fn stop(managed: &mut [Managed], names: &[String]) -> Result<String, String> {
         }
         match stop_child(entry, STOP_TIMEOUT) {
             Ok(()) => stopped.push(entry.process.name.clone()),
-            Err(error) => errors.push(error),
+            Err(error) => errors.push(error.to_string()),
         }
     }
     if errors.is_empty() {
@@ -338,32 +335,42 @@ fn stop(managed: &mut [Managed], names: &[String]) -> Result<String, String> {
             Ok(format!("已停止：{}", stopped.join(", ")))
         }
     } else {
-        Err(errors.join("；"))
+        Err(Error::new(ErrorKind::Unavailable, errors.join("；")))
     }
 }
 
-fn restart(managed: &mut [Managed], names: &[String]) -> Result<String, String> {
+fn restart(managed: &mut [Managed], names: &[String]) -> Result<String> {
     let stop_result = stop(managed, names);
     let start_result = start(managed, names);
     match (stop_result, start_result) {
         (Ok(stop), Ok(start)) => Ok(format!("{stop}；{start}")),
-        (stop, start) => Err(format!(
-            "{}；{}",
-            stop.unwrap_or_else(|error| error),
-            start.unwrap_or_else(|error| error)
+        (stop, start) => Err(Error::new(
+            ErrorKind::Unavailable,
+            format!(
+                "{}；{}",
+                stop.unwrap_or_else(|error| error.to_string()),
+                start.unwrap_or_else(|error| error.to_string())
+            ),
         )),
     }
 }
 
-fn stop_child(entry: &mut Managed, timeout: Duration) -> Result<(), String> {
+fn stop_child(entry: &mut Managed, timeout: Duration) -> Result<()> {
     let name = entry.process.name.clone();
     let Some(pid) = entry.lifecycle.child().map(Child::id) else {
         return Ok(());
     };
-    let pid = i32::try_from(pid).map_err(|_| format!("{name} 的 pid 超出范围"))?;
+    let pid = i32::try_from(pid).map_err(|e| {
+        Error::caused_by(ErrorKind::OutOfRange, "process id out of range", e)
+            .with_context("process", &name)
+    })?;
     match kill(Pid::from_raw(pid), Signal::SIGINT) {
         Ok(()) | Err(Errno::ESRCH) => {}
-        Err(error) => return Err(format!("{name} 发送 SIGINT 失败：{error}")),
+        Err(error) => {
+            return Err(Error::from(std::io::Error::from(error))
+                .with_operation("signal process")
+                .with_context("process", &name));
+        }
     }
 
     let deadline = Instant::now() + timeout;
@@ -372,10 +379,14 @@ fn stop_child(entry: &mut Managed, timeout: Duration) -> Result<(), String> {
             let child = entry
                 .lifecycle
                 .child_mut()
-                .ok_or_else(|| format!("{name} 状态不一致"))?;
+                .ok_or_else(|| Error::new(ErrorKind::Internal, format!("{name} 状态不一致")))?;
             match child.try_wait() {
                 Ok(status) => status,
-                Err(error) => return Err(format!("{name} try_wait: {error}")),
+                Err(error) => {
+                    return Err(Error::from(error)
+                        .with_operation("wait for process")
+                        .with_context("process", &name));
+                }
             }
         };
         if let Some(status) = exited {
@@ -384,7 +395,10 @@ fn stop_child(entry: &mut Managed, timeout: Duration) -> Result<(), String> {
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err(format!("{name} 在 {}s 内未退出", timeout.as_secs()));
+            return Err(Error::new(
+                ErrorKind::Timeout,
+                format!("{name} 在 {}s 内未退出", timeout.as_secs()),
+            ));
         }
         thread::sleep(Duration::from_millis(50));
     }
@@ -400,7 +414,7 @@ fn resolve_indices(
     managed: &[Managed],
     names: &[String],
     defaults: Defaults,
-) -> Result<Vec<usize>, String> {
+) -> Result<Vec<usize>> {
     if names.is_empty() {
         return Ok(managed
             .iter()
@@ -417,7 +431,7 @@ fn resolve_indices(
         let index = managed
             .iter()
             .position(|entry| &entry.process.name == name)
-            .ok_or_else(|| format!("未知进程：{name}"))?;
+            .ok_or_else(|| Error::new(ErrorKind::NotFound, format!("未知进程：{name}")))?;
         if !indices.contains(&index) {
             indices.push(index);
         }
@@ -438,12 +452,12 @@ fn statuses(managed: &[Managed]) -> Vec<ProcessStatus> {
         .collect()
 }
 
-fn spawn(entry: &Managed) -> Result<Child, String> {
+fn spawn(entry: &Managed) -> Result<Child> {
     let process = &entry.process;
     let program = process
         .command
         .first()
-        .ok_or_else(|| "command 为空".to_owned())?;
+        .ok_or_else(|| Error::new(ErrorKind::InvalidArgument, "command 为空"))?;
     let mut command = Command::new(program);
     if entry.output.is_some() {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -453,7 +467,11 @@ fn spawn(entry: &Managed) -> Result<Child, String> {
         .stdin(Stdio::null())
         .process_group(0)
         .spawn()
-        .map_err(|error| format!("启动 {}: {error}", process.name))?;
+        .map_err(|error| {
+            Error::from(error)
+                .with_operation("spawn")
+                .with_context("process", &process.name)
+        })?;
     if let Some(output) = &entry.output {
         output.line(child.id(), "supervisor", b"started");
         output.attach(&mut child);
@@ -466,25 +484,32 @@ fn backoff(attempt: u32) -> Duration {
     (RESTART_BASE * (1_u32 << shift)).min(RESTART_MAX)
 }
 
-fn bind_socket() -> Result<UnixListener, String> {
+fn bind_socket() -> Result<UnixListener> {
     let path = Path::new(SOCKET);
     let directory = path
         .parent()
-        .ok_or_else(|| format!("{SOCKET} 没有父目录"))?;
-    fs::create_dir_all(directory)
-        .map_err(|error| format!("创建 {}: {error}", directory.display()))?;
+        .ok_or_else(|| Error::new(ErrorKind::InvalidArgument, format!("{SOCKET} 没有父目录")))?;
+    fs::create_dir_all(directory).at_path("创建", directory)?;
     fs::set_permissions(directory, fs::Permissions::from_mode(0o755))
-        .map_err(|error| format!("chmod {}: {error}", directory.display()))?;
+        .at_path("chmod", directory)?;
 
     if path.exists() {
         if UnixStream::connect(path).is_ok() {
-            return Err("supervisor 已在运行".to_owned());
+            return Err(Error::new(ErrorKind::Unavailable, "supervisor 已在运行"));
         }
-        fs::remove_file(path).map_err(|error| format!("删除旧 socket: {error}"))?;
+        fs::remove_file(path)
+            .map_err(|error| Error::from(error).with_operation("删除旧 socket"))?;
     }
-    let listener = UnixListener::bind(path).map_err(|error| format!("绑定 {SOCKET}: {error}"))?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-        .map_err(|error| format!("chmod {SOCKET}: {error}"))?;
+    let listener = UnixListener::bind(path).map_err(|error| {
+        Error::from(error)
+            .with_operation("bind supervisor socket")
+            .with_context("path", SOCKET)
+    })?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|error| {
+        Error::from(error)
+            .with_operation("chmod")
+            .with_context("path", SOCKET)
+    })?;
     Ok(listener)
 }
 
@@ -528,7 +553,7 @@ fn serve(mut stream: UnixStream, sender: &mpsc::Sender<(Request, mpsc::SyncSende
                     .unwrap_or_else(|_| error_response("supervisor 响应超时"))
             }
         }
-        Err(error) => error_response(&error),
+        Err(error) => error_response(&error.to_string()),
     };
     if let Ok(text) = serde_json::to_string(&response) {
         let _ = stream.write_all(text.as_bytes());
@@ -537,22 +562,23 @@ fn serve(mut stream: UnixStream, sender: &mpsc::Sender<(Request, mpsc::SyncSende
     }
 }
 
-fn read_request(stream: &UnixStream) -> Result<Request, String> {
+fn read_request(stream: &UnixStream) -> Result<Request> {
     let clone = stream
         .try_clone()
-        .map_err(|error| format!("复制 socket: {error}"))?;
+        .map_err(|error| Error::from(error).with_operation("复制 socket"))?;
     let mut reader = BufReader::new(clone);
     let mut line = String::new();
     let read = reader
         .read_line(&mut line)
-        .map_err(|error| format!("读取请求: {error}"))?;
+        .map_err(|error| Error::from(error).with_operation("读取请求"))?;
     if read == 0 {
-        return Err("空请求".to_owned());
+        return Err(Error::new(ErrorKind::InvalidArgument, "空请求"));
     }
     if line.len() > MAX_REQUEST {
-        return Err("请求过大".to_owned());
+        return Err(Error::new(ErrorKind::InvalidArgument, "请求过大"));
     }
-    serde_json::from_str(&line).map_err(|error| format!("解析请求: {error}"))
+    serde_json::from_str(&line)
+        .map_err(|error| Error::caused_by(ErrorKind::InvalidData, "解析请求", error))
 }
 
 fn error_response(message: &str) -> Response {

@@ -1,6 +1,6 @@
 use crate::{
     protocol::{IMAGE_CHUNK_HEADER_LEN, ImageChunkHeader, Kind, Link, Message},
-    topics::{SensorPublishers, error},
+    topics::SensorPublishers,
 };
 use firefly_pubsub::camera::{IMAGE_HEIGHT, IMAGE_SIZE, IMAGE_WIDTH};
 use firefly_pubsub::{
@@ -23,7 +23,9 @@ struct Checksums {
 impl Checksums {
     fn publish(&self, mut message: ScalarMessage) -> Result<()> {
         message.sequence = self.sequence.get();
-        self.publisher.publish(message).map_err(error)?;
+        self.publisher
+            .publish(message)
+            .map_err(std::io::Error::other)?;
         self.sequence.set(message.sequence.wrapping_add(1));
         Ok(())
     }
@@ -52,7 +54,7 @@ impl SensorIngress {
                         Some(SCALAR_BUFFER_SIZE),
                         Some(VIZ_MAX_PUBLISHERS),
                     )
-                    .map_err(error)?,
+                    .map_err(std::io::Error::other)?,
                     sequence: Cell::new(0),
                 },
             },
@@ -83,7 +85,7 @@ impl SensorIngress {
                 } else {
                     &self.ports.sensors.right
                 };
-                publisher.publish(*image).map_err(error)?;
+                publisher.publish(*image).map_err(std::io::Error::other)?;
                 publish_image_checksum(&self.ports, &image)?;
                 Ok(0)
             }
@@ -191,7 +193,7 @@ fn publish_assembled(ports: &IngressPorts, image: ChunkAssembly) -> Result<()> {
                         }
                     }
                 })
-                .map_err(error)?;
+                .map_err(std::io::Error::other)?;
             let side = if sensor_id == 0 { "left" } else { "right" };
             let mut scalar = ScalarMessage::base(timestamp, &format!("hil/camera/{side}"));
             scalar.scalars = [timestamp, sum as f64, f64::from(width), f64::from(height)];
@@ -232,7 +234,7 @@ fn publish_down(
                 sum += payload.iter().map(|&v| u64::from(v)).sum::<u64>();
             }
         })
-        .map_err(error)?;
+        .map_err(std::io::Error::other)?;
     let mut scalar = ScalarMessage::base(timestamp, "hil/camera/down");
     scalar.scalar_count = 4;
     scalar.scalars = [timestamp, sum as f64, DOWN_WIDTH as f64, DOWN_HEIGHT as f64];

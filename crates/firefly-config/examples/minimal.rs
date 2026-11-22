@@ -36,7 +36,11 @@ struct Arguments {
     config: Option<PathBuf>,
 }
 
-fn main() -> Result<()> {
+fn main() -> std::process::ExitCode {
+    firefly_error::report("minimal", run_app())
+}
+
+fn run_app() -> firefly_error::Result<()> {
     let path = Arguments::parse()
         .config
         .unwrap_or_else(|| firefly_config::paths::config("minimal.toml"));

@@ -1,3 +1,4 @@
+use firefly_error::{Error, ErrorKind, Result};
 use std::time::Duration;
 
 use nusb::MaybeFuture;
@@ -23,10 +24,10 @@ impl HostLink {
     ///
     /// # Errors
     /// 设备缺席、描述符不含预期接口或端点、认领失败。
-    pub fn open(config: &Config) -> Result<Self, String> {
+    pub fn open(config: &Config) -> Result<Self> {
         let devices = nusb::list_devices()
             .wait()
-            .map_err(|error| format!("list USB devices: {error}"))?;
+            .map_err(|error| Error::caused_by(ErrorKind::Unavailable, "list USB devices", error))?;
         let mut info = None;
         for device in devices {
             if device.vendor_id() != config.usb.vendor || device.product_id() != config.usb.product
@@ -42,18 +43,21 @@ impl HostLink {
             break;
         }
         let info = info.ok_or_else(|| {
-            format!(
-                "找不到 HIL 设备 {:04x}:{:04x} serial={}",
-                config.usb.vendor, config.usb.product, config.usb.serial
+            Error::new(
+                ErrorKind::NotFound,
+                format!(
+                    "找不到 HIL 设备 {:04x}:{:04x} serial={}",
+                    config.usb.vendor, config.usb.product, config.usb.serial
+                ),
             )
         })?;
         let device = info
             .open()
             .wait()
-            .map_err(|error| format!("open USB device: {error}"))?;
-        let active = device
-            .active_configuration()
-            .map_err(|error| format!("active configuration: {error}"))?;
+            .map_err(|error| Error::caused_by(ErrorKind::Unavailable, "open USB device", error))?;
+        let active = device.active_configuration().map_err(|error| {
+            Error::caused_by(ErrorKind::Unavailable, "active configuration", error)
+        })?;
         let mut found = None;
         for interface in active.interfaces() {
             let alt = interface.first_alt_setting();
@@ -65,11 +69,11 @@ impl HostLink {
                 break;
             }
         }
-        let (number, out_endpoint, in_endpoint) = found.ok_or("缺少 HIL 厂商接口")?;
-        let interface = device
-            .claim_interface(number)
-            .wait()
-            .map_err(|error| format!("claim HIL interface: {error}"))?;
+        let (number, out_endpoint, in_endpoint) =
+            found.ok_or_else(|| Error::new(ErrorKind::Unsupported, "缺少 HIL 厂商接口"))?;
+        let interface = device.claim_interface(number).wait().map_err(|error| {
+            Error::caused_by(ErrorKind::Unavailable, "claim HIL interface", error)
+        })?;
         Ok(Self {
             device,
             interface,
@@ -86,35 +90,35 @@ impl HostLink {
         self,
         write_buffer: usize,
         read_buffer: usize,
-    ) -> Result<
-        (
-            EndpointWrite<Bulk>,
-            EndpointRead<Bulk>,
-            nusb::Device,
-            nusb::Interface,
-        ),
-        String,
-    > {
+    ) -> Result<(
+        EndpointWrite<Bulk>,
+        EndpointRead<Bulk>,
+        nusb::Device,
+        nusb::Interface,
+    )> {
         let writer = self
             .interface
             .endpoint::<Bulk, Out>(self.out_endpoint)
-            .map_err(|error| format!("下行端点 0x{:02x}: {error}", self.out_endpoint))?
+            .map_err(|error| {
+                Error::caused_by(ErrorKind::Unavailable, "open USB endpoint", error)
+                    .with_context("endpoint", self.out_endpoint)
+            })?
             .writer(write_buffer)
             .with_write_timeout(Duration::from_millis(100));
         let reader = self
             .interface
             .endpoint::<Bulk, In>(self.in_endpoint)
-            .map_err(|error| format!("上行端点 0x{:02x}: {error}", self.in_endpoint))?
+            .map_err(|error| {
+                Error::caused_by(ErrorKind::Unavailable, "open USB endpoint", error)
+                    .with_context("endpoint", self.in_endpoint)
+            })?
             .reader(read_buffer)
             .with_read_timeout(Duration::from_millis(100));
         Ok((writer, reader, self.device, self.interface))
     }
 }
 
-fn bulk_endpoint(
-    alt: &nusb::descriptors::InterfaceDescriptor<'_>,
-    out: bool,
-) -> Result<u8, String> {
+fn bulk_endpoint(alt: &nusb::descriptors::InterfaceDescriptor<'_>, out: bool) -> Result<u8> {
     for endpoint in alt.endpoints() {
         if endpoint.transfer_type() != TransferType::Bulk {
             continue;
@@ -125,10 +129,13 @@ fn bulk_endpoint(
             return Ok(address);
         }
     }
-    Err(format!(
-        "接口 {} 缺少批量 {} 端点",
-        alt.interface_number(),
-        if out { "OUT" } else { "IN" }
+    Err(Error::new(
+        ErrorKind::Unsupported,
+        format!(
+            "接口 {} 缺少批量 {} 端点",
+            alt.interface_number(),
+            if out { "OUT" } else { "IN" }
+        ),
     ))
 }
 
@@ -136,10 +143,10 @@ fn bulk_endpoint(
 ///
 /// # Errors
 /// 设备无法列出或打开。
-pub fn probe(config: &Config) -> Result<(), String> {
+pub fn probe(config: &Config) -> Result<()> {
     let devices = nusb::list_devices()
         .wait()
-        .map_err(|error| format!("list USB devices: {error}"))?;
+        .map_err(|error| Error::caused_by(ErrorKind::Unavailable, "list USB devices", error))?;
     let mut found = false;
     for device in devices {
         println!(
@@ -162,10 +169,10 @@ pub fn probe(config: &Config) -> Result<(), String> {
         let opened = device
             .open()
             .wait()
-            .map_err(|error| format!("open: {error}"))?;
-        let active = opened
-            .active_configuration()
-            .map_err(|error| format!("active configuration: {error}"))?;
+            .map_err(|error| Error::caused_by(ErrorKind::Unavailable, "open", error))?;
+        let active = opened.active_configuration().map_err(|error| {
+            Error::caused_by(ErrorKind::Unavailable, "active configuration", error)
+        })?;
         println!(
             "配置 {} 接口 {}",
             active.configuration_value(),
@@ -195,9 +202,12 @@ pub fn probe(config: &Config) -> Result<(), String> {
     if found {
         Ok(())
     } else {
-        Err(format!(
-            "没有找到 {:04x}:{:04x}",
-            config.usb.vendor, config.usb.product
+        Err(Error::new(
+            ErrorKind::NotFound,
+            format!(
+                "没有找到 {:04x}:{:04x}",
+                config.usb.vendor, config.usb.product
+            ),
         ))
     }
 }

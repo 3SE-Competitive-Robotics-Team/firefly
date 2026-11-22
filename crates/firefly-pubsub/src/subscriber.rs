@@ -1,5 +1,6 @@
 //! 泛型订阅端：统一服务容量与接收缓冲配置，保留 trace 用户头。
 
+use firefly_error::{Error, ErrorKind};
 use std::fmt::Debug;
 
 use iceoryx2::port::subscriber::Subscriber as Iox2Subscriber;
@@ -92,17 +93,15 @@ impl<T: Debug + ZeroCopySend + 'static> Subscriber<T> {
             max_publishers,
         } = options;
         if buffer_size == 0 || service_max_buffer_size.is_some_and(|max| buffer_size > max) {
-            return Err(firefly_error::Error::new(
-                firefly_error::ErrorKind::InvalidArgument,
+            return Err(Error::new(
+                ErrorKind::InvalidArgument,
                 format!("话题 `{topic}` 的订阅缓冲必须大于零且不超过服务容量"),
             ));
         }
         let mut builder = node
             .service_builder(&topic.try_into().map_err(|e| {
-                firefly_error::Error::new(
-                    firefly_error::ErrorKind::InvalidArgument,
-                    format!("非法话题名 `{topic}`: {e:?}"),
-                )
+                Error::caused_by(ErrorKind::InvalidArgument, "非法话题名", e)
+                    .with_context("topic", topic)
             })?)
             .publish_subscribe::<T>()
             .user_header::<TraceContext>();
@@ -118,20 +117,16 @@ impl<T: Debug + ZeroCopySend + 'static> Subscriber<T> {
             builder = builder.max_publishers(max);
         }
         let service = builder.open_or_create().map_err(|e| {
-            firefly_error::Error::new(
-                firefly_error::ErrorKind::Internal,
-                format!("打开/创建话题 `{topic}` 失败: {e:?}"),
-            )
+            Error::caused_by(ErrorKind::Unavailable, "打开/创建话题 失败", e)
+                .with_context("topic", topic)
         })?;
         let subscriber = service
             .subscriber_builder()
             .buffer_size(buffer_size)
             .create()
             .map_err(|e| {
-                firefly_error::Error::new(
-                    firefly_error::ErrorKind::Internal,
-                    format!("创建订阅器失败: {e:?}"),
-                )
+                Error::caused_by(ErrorKind::Unavailable, "创建订阅器失败", e)
+                    .with_context("topic", topic)
             })?;
         Ok(Self { subscriber })
     }
@@ -150,12 +145,7 @@ impl<T: Debug + ZeroCopySend + 'static> Subscriber<T> {
     /// # Errors
     /// 接收失败（连接中断等）。
     pub fn receive(&self) -> Result<Option<Received<T>>, firefly_error::Error> {
-        self.subscriber.receive().map_err(|e| {
-            firefly_error::Error::temporary(
-                firefly_error::ErrorKind::Internal,
-                format!("接收样本失败: {e:?}"),
-            )
-        })
+        self.subscriber.receive().map_err(receive_error)
     }
 }
 
@@ -165,10 +155,8 @@ impl<T: Debug + ZeroCopySend + 'static> Subscriber<[T]> {
     /// 服务或订阅端创建失败。
     pub fn with_slice_topic(node: &IpcNode, topic: &str) -> Result<Self, firefly_error::Error> {
         let name = topic.try_into().map_err(|e| {
-            firefly_error::Error::new(
-                firefly_error::ErrorKind::InvalidArgument,
-                format!("非法话题名: {e:?}"),
-            )
+            Error::caused_by(ErrorKind::InvalidArgument, "非法话题名", e)
+                .with_context("topic", topic)
         })?;
         let service = node
             .service_builder(&name)
@@ -176,20 +164,16 @@ impl<T: Debug + ZeroCopySend + 'static> Subscriber<[T]> {
             .user_header::<TraceContext>()
             .open_or_create()
             .map_err(|e| {
-                firefly_error::Error::new(
-                    firefly_error::ErrorKind::Internal,
-                    format!("创建切片服务失败: {e:?}"),
-                )
+                Error::caused_by(ErrorKind::Unavailable, "创建切片服务失败", e)
+                    .with_context("topic", topic)
             })?;
         let subscriber = service
             .subscriber_builder()
             .buffer_size(1)
             .create()
             .map_err(|e| {
-                firefly_error::Error::new(
-                    firefly_error::ErrorKind::Internal,
-                    format!("创建切片订阅器失败: {e:?}"),
-                )
+                Error::caused_by(ErrorKind::Unavailable, "创建切片订阅器失败", e)
+                    .with_context("topic", topic)
             })?;
         Ok(Self { subscriber })
     }
@@ -197,12 +181,20 @@ impl<T: Debug + ZeroCopySend + 'static> Subscriber<[T]> {
     /// # Errors
     /// 接收 IPC 样本失败。
     pub fn receive(&self) -> Result<Option<Received<[T]>>, firefly_error::Error> {
-        self.subscriber.receive().map_err(|e| {
-            firefly_error::Error::temporary(
-                firefly_error::ErrorKind::Internal,
-                format!("接收切片失败: {e:?}"),
-            )
-        })
+        self.subscriber.receive().map_err(receive_error)
+    }
+}
+
+#[track_caller]
+fn receive_error(e: iceoryx2::port::ReceiveError) -> Error {
+    use iceoryx2::port::ReceiveError;
+    match e {
+        ReceiveError::ExceedsMaxBorrows => {
+            Error::temporary(ErrorKind::ResourceExhausted, "receive IPC sample").with_source(e)
+        }
+        ReceiveError::ConnectionFailure(_) => {
+            Error::caused_by(ErrorKind::Unavailable, "receive IPC sample", e)
+        }
     }
 }
 
@@ -266,9 +258,7 @@ mod tests {
                     ..Default::default()
                 },
             );
-            assert!(
-                matches!(result, Err(error) if error.kind() == firefly_error::ErrorKind::InvalidArgument)
-            );
+            assert!(matches!(result, Err(error) if error.kind() == ErrorKind::InvalidArgument));
         }
     }
 }

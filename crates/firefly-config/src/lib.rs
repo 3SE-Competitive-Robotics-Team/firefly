@@ -64,10 +64,9 @@ fn read<T: DeserializeOwned>(path: &Path) -> Result<(T, Source)> {
             (String::new(), Source::Defaults)
         }
         Err(error) => {
-            return Err(Error::new(ErrorKind::Internal, "cannot read config")
+            return Err(Error::from(error)
                 .with_operation("load config")
-                .with_context("path", path.display())
-                .with_source(error));
+                .with_context("path", path.display()));
         }
     };
     let config = toml::from_str(&raw).map_err(|error| {

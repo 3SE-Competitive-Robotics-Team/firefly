@@ -27,19 +27,17 @@ enum Command {
 
 fn main() -> ExitCode {
     let command = Arguments::parse().command;
-    match dispatch(&command) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("hil-gadget {command:?}: {error}");
-            #[cfg(target_os = "linux")]
-            setup::note(&format!("{command:?} 失败：{error}"));
-            ExitCode::FAILURE
-        }
+    let result =
+        dispatch(&command).map_err(|e| e.with_context("command", format_args!("{command:?}")));
+    #[cfg(target_os = "linux")]
+    if let Err(error) = &result {
+        setup::note(&format!("{command:?} 失败：{error}"));
     }
+    firefly_error::report("hil-gadget", result)
 }
 
 #[cfg(target_os = "linux")]
-fn dispatch(command: &Command) -> Result<(), String> {
+fn dispatch(command: &Command) -> firefly_error::Result<()> {
     match command {
         Command::Up => setup::up(),
         Command::Serve => setup::serve(),
@@ -54,6 +52,9 @@ fn dispatch(command: &Command) -> Result<(), String> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn dispatch(_command: &Command) -> Result<(), String> {
-    Err("HIL gadget 依赖 Linux FunctionFS，只在板端运行".into())
+fn dispatch(_command: &Command) -> firefly_error::Result<()> {
+    Err(firefly_error::Error::new(
+        firefly_error::ErrorKind::Unsupported,
+        "HIL gadget 依赖 Linux FunctionFS，只在板端运行",
+    ))
 }

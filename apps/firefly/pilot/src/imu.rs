@@ -38,7 +38,7 @@ pub struct Worker {
     latest: Arc<Mutex<Option<Snapshot>>>,
     pub grounded: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
+    handle: Option<JoinHandle<Result<()>>>,
 }
 impl Worker {
     pub fn spawn(options: Options) -> Result<Self> {
@@ -50,19 +50,18 @@ impl Worker {
         let handle = thread::Builder::new()
             .name("fc-imu".into())
             .spawn(move || {
-                if let Err(error) = run(options, &output, &on_ground, &stopping) {
-                    log::error!("IMU 工作线程退出: {error}");
+                let _exit = std::mem::DropGuard::new((), |()| {
                     super::RUNNING.store(false, Ordering::Relaxed);
-                }
+                });
+                let result = run(options, &output, &on_ground, &stopping);
                 if let Ok(mut value) = output.lock()
                     && let Some(s) = value.as_mut()
                 {
                     s.ready = false;
                 }
+                result
             })
-            .map_err(|e| {
-                Error::new(ErrorKind::Internal, e.to_string()).with_operation("spawn FC IMU worker")
-            })?;
+            .map_err(|e| Error::from(e).with_operation("spawn FC IMU worker"))?;
         Ok(Self {
             latest,
             grounded,
@@ -77,14 +76,21 @@ impl Worker {
         }
         Some(snapshot)
     }
+    pub fn finish(&mut self) -> Result<()> {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            handle
+                .join()
+                .map_err(|_| Error::new(ErrorKind::Internal, "IMU 工作线程 panic"))??;
+        }
+        Ok(())
+    }
 }
+
 impl Drop for Worker {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take()
-            && handle.join().is_err()
-        {
-            log::error!("IMU 工作线程 panic");
+        if let Err(error) = self.finish() {
+            log::error!("IMU 工作线程退出: {error}");
         }
     }
 }
@@ -101,17 +107,17 @@ fn run(
     let waitset = WaitSetBuilder::new()
         .create::<ipc::Service>()
         .map_err(|e| {
-            Error::new(ErrorKind::Internal, format!("create FC IMU WaitSet: {e:?}"))
+            Error::caused_by(ErrorKind::Internal, "create FC IMU WaitSet", e)
                 .with_operation("FC IMU waitset")
         })?;
     let _imu_guard = waitset.attach_notification(&imu_events).map_err(|e| {
-        Error::new(ErrorKind::Internal, format!("attach FC IMU event: {e:?}"))
+        Error::caused_by(ErrorKind::Internal, "attach FC IMU event", e)
             .with_operation("FC IMU waitset")
     })?;
     let _timeout_guard = waitset
         .attach_interval(Duration::from_millis(2))
         .map_err(|e| {
-            Error::new(ErrorKind::Internal, format!("attach FC IMU timeout: {e:?}"))
+            Error::caused_by(ErrorKind::Internal, "attach FC IMU timeout", e)
                 .with_operation("FC IMU waitset")
         })?;
 
@@ -120,7 +126,7 @@ fn run(
     let mut count = 0u64;
     let mut rejected = false;
     let mut last_log = Instant::now();
-    let failure = RefCell::new(None::<String>);
+    let failure = RefCell::new(None::<Error>);
     {
         let mut on_event = |_attachment: WaitSetAttachmentId<ipc::Service>| {
             if stop.load(Ordering::Relaxed) || !super::RUNNING.load(Ordering::Relaxed) {
@@ -150,7 +156,7 @@ fn run(
             match result {
                 Ok(()) => CallbackProgression::Continue,
                 Err(error) => {
-                    *failure.borrow_mut() = Some(error.to_string());
+                    *failure.borrow_mut() = Some(error);
                     CallbackProgression::Stop
                 }
             }
@@ -168,18 +174,17 @@ fn run(
                     | WaitSetRunResult::TerminationRequest,
                 ) => break,
                 Err(error) => {
-                    return Err(Error::new(
-                        ErrorKind::Internal,
-                        format!("FC IMU WaitSet: {error:?}"),
-                    )
-                    .with_operation("FC IMU waitset"));
+                    return Err(
+                        Error::caused_by(ErrorKind::Internal, "FC IMU WaitSet", error)
+                            .with_operation("FC IMU waitset"),
+                    );
                 }
             }
         }
     }
     fastrace::flush();
     if let Some(message) = failure.into_inner() {
-        return Err(Error::new(ErrorKind::Internal, message).with_operation("FC IMU"));
+        return Err(message);
     }
     Ok(())
 }
