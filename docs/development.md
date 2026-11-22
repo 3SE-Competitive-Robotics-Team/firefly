@@ -1,73 +1,75 @@
 # 开发指南
 
-以下命令从仓库根目录执行。
-
-## Rust 命令行统一使用 usage-rs
-
-所有 Rust 应用、`xtask`、示例和自定义基准程序都用 `usage-rs` 解析命令行参数。在所属 crate 的 `[dependencies]` 中写入 `usage-rs.workspace = true`。如果只有示例或基准程序需要解析参数，将这行放在 `[dev-dependencies]`。
-
-在参数结构体上派生 `usage_rs::Cli`，有子命令时在枚举上派生 `usage_rs::Subcommands`。在 `main` 中先调用 `Arguments::parse()`，再读取配置、连接 IPC 或打开设备。这样用户运行 `--help` 时就能直接看到用法。文件路径用 `PathBuf`，默认配置路径用 `firefly_config::paths::config` 取得。可参考[最小示例](../crates/firefly-config/examples/minimal.rs)和 [xtask 的子命令](../xtask/src/main.rs)。
-
-修改 CLI 后，运行对应命令的 `--help` 核对用法，用 `__usage_spec__` 查看参数声明。测试中调用 `parse_from`，检查必填参数、互斥选项和每个选项接受几个值。声明语法见 [usage-rs 参数指南](https://usage.jdx.dev/rust/args-and-flags)。
+以下构建、仿真和部署命令都在 Mac 的仓库根目录执行。标有 Orange Pi 的命令在板上执行。
 
 ## 构建
 
-同步 Python 环境，构建桌面 release 程序。
-
 ```bash
-uv sync --all-packages --extra test
+git submodule update --init
+uv sync --locked --all-packages --extra test
 cargo xtask release
 ```
 
-构建板端程序需先启动 Apple container。
+Orange Pi 程序用 Apple `container` 构建。只需生成板端二进制时运行以下命令。部署命令也会执行这一步。
 
 ```bash
 container system start
 cargo xtask release --target board
 ```
 
-Matrix BMI270 飞控固件使用单独的 `linux/amd64` 容器构建。编译命令和 HEX 路径见 [Matrix 固件构建说明](../apps/third-party/README.md#编译-matrix-bmi270-固件)。
+Matrix BMI270 固件使用单独的 `linux/amd64` 镜像。容器构建说明给出了镜像、可刷写 HEX 的位置和协议测试入口。[Matrix 固件构建](../apps/third-party/README.md#编译-matrix-bmi270-固件)
 
-### Matrix USB 与仿真杆量
+## 运行
 
-普通板端由 `pilot` 独占 `configs/pilot.toml` 所指定的 USB 设备。它将 Matrix 的 BMI270 样本按 SI 单位发布到 `Firefly/Imu`，RootSLAM 使用飞控采样时间映射到的板端单调时钟。要连接 Configurator，在板上运行 `ffctl process stop pilot`，等一秒多再连接。结束配置后用 `ffctl process start pilot` 恢复采集。
+### Mac 软件在环（SIL）
 
-板端控制输入为 `Firefly/Sticks`。发布者使用板端 CLOCK_MONOTONIC 秒填入 `state_time`，按横滚、俯仰、偏航、油门顺序填写四个通道。pilot 在每个约 20 ms 的发送周期取最新鲜的有效命令，静默时只发心跳。实机开关应同时启用 ANGLE 与 FIREFLY CONTROL，ARM 由遥控器单独操作。协议和授权条件见 [Matrix 固件说明](../apps/third-party/betaflight/docs/firefly_serial_protocol.md)。
+准备 GPU 图形会话、[场地资产](../packages/firefly-cad/README.md)和任务所需模型。从一次悬停任务开始。
 
-仿真使用 `pilot --simulation` 将位置参考转换为相同的四通道杆量。Mac 上的 `fc` 用仿真 IMU 和机体参数计算推力，SIL 直接订阅杆量，HIL 由板端通过 USB 桥回传。SIL 启动器为 RootSLAM 分配 4 个 Rayon 工作线程，让视觉估计与模拟飞控共享主机 CPU。
+```bash
+cargo xtask sil configs/mission-hover.toml
+```
+
+可在同一次调用中依次验收多个计划，例如 `cargo xtask sil configs/mission-square.toml configs/mission-cuboid.toml`。各架次共享一个 VIO 坐标系。每次落稳上锁后，xtask 再提交下一项任务。若已有飞行进程占用 IPC，用 `cargo xtask processes .` 查看 PID。
+
+### USB 硬件在环（HIL）
+
+Mac 运行 MuJoCo、render、模拟飞控和 Mimir。Orange Pi 运行任务和在线算法。Mac 与 Orange Pi 之间的 USB 连接传输仿真测量、杆量和遥测。[部署分工](architecture.md#部署与验证边界)
+
+```bash
+cargo xtask deploy-hil
+cargo xtask hil configs/mission-square.toml
+```
+
+SIL 和 HIL 都在录制结束后逐架次评分。要重新评分，向 `target/release/firefly-verify --transport sil` 或 `--transport hil` 传入对应的运行目录。评分器将 JSON 写到标准输出，通过时返回 0。[运行归档与回放](mimir.md#录制与读取)
 
 ### 板上任务服务
 
-安装包含 `firefly-daemon` 和 `ffctl` 的 board release。Orange Pi BSP 随开机启动 `firefly.service` 并读取 `/opt/firefly/configs/processes.toml`。普通进程清单自动启动 pilot 和 RootSLAM。将 Matrix 接入 Orange Pi USB Host，核对 `configs/pilot.toml` 中的设备路径。相机装好后可用 `ffctl process enable camera` 启用。部署会更新进程清单，现场交付时需核对设备启用项与实测机体参数。
+用 `adb devices` 核对 Orange Pi 的设备号。在仓库的 `models/` 下备齐精降的 `h-marker.nb`、`viplite.json` 和深度模型 `yolo26n-depth-320-int8.nb` 后部署。部署会停止服务，更新 `/opt/firefly` 的程序、配置和模型，再启动服务。[打包文件清单](../xtask/src/deploy.rs) · [板端模型准备](#板端模型)
 
 ```bash
-cd /opt/firefly
-ffctl mission status
-ffctl mission submit inspection-001 configs/mission-square.toml
-ffctl mission status inspection-001
+container system start
+cargo xtask deploy --device firefly-0001
+adb -s firefly-0001 shell
 ```
 
-Matrix 固件当前只回传 IMU。上述任务提交需要支持飞控状态反馈的运行环境，例如 HIL。
+在 Orange Pi 上运行 `ffctl process status` 检查 `pilot` 和 `firefly-rootslam`，用 `ffctl mission status` 查询任务服务。实机尚缺任务所需的机体参数和飞控解锁状态反馈。HIL 提供这些反馈，可以用 `ffctl mission submit inspection-001 configs/mission-square.toml` 提交计划，再用 `ffctl mission status inspection-001` 查询回执。相同 ID 和计划可重试，取消用 `ffctl mission cancel inspection-001`。[任务阶段和回执](architecture.md#系统运行架次和任务)
 
-同 ID 重试会返回该任务的当前或最终回执。需要中断时使用 `ffctl mission cancel inspection-001`。任务进入 `complete` 或 `interrupted` 后，可查询运行就绪状态，再提交新的任务 ID。板上应用可直接使用 `firefly_mission::call`。当前 socket 允许服务所属用户访问。现场任务通过计划指定本架次的起飞高度、以起飞点为原点的三维航点、停留时间、返航偏移和精降方式。普通返航偏移默认为零。示例长方体上框高 3.3 米，SIL 配套场地的规划上界为 3.7 米。现场应根据实测空间配置规划边界。
+进程启用项、命令和 CPU 亲和性以[实机清单](../configs/processes.toml)和 [HIL 清单](../configs/processes-hil.toml)为准。装好相机后用 `ffctl process enable camera` 启用。板端需要 RRD 时手动启动 `firefly-mimir.service`，HIL 由 Mac 录制。
 
-每份计划最多 16 点。起飞和返航高度为 0.5–2 米，停留时间为 (0, 600] 秒，返航平面偏移不超过 0.3 米。航点距起点水平半径不超过 10 米，首点水平距离至少 1 米，各段三维长度为 0.5–10 米。航点高度为 0.5–3.3 米，以支持长方体竖边。`systemctl cat firefly-daemon.service firefly-mimir.service` 可查看部署的两个单元。部署会关闭板端 Mimir 自启动。普通板端运行如需本地录制，可手动执行 `systemctl start firefly-mimir.service`。USB HIL 由宿主机 Mimir 同步录制板端遥测和仿真真值。
+每份计划最多 16 个航点，起飞和返航高度为 0.5–2 米。航点水平半径最多 10 米，首点距起飞点的水平距离至少 1 米。每段三维距离为 0.5–10 米，航点高度为 0.5–3.3 米。停留时间大于 0 秒且不超过 600 秒，返航平面偏移不超过 0.3 米。[计划校验](../crates/firefly-mission/src/lib.rs)
 
-### A733 进程绑核
+### 验证 Matrix IMU
 
-普通模式和 USB HIL 使用相同的板端 CPU 分配。planner 的规划和建图线程可在 CPU 2、4 并行，RootSLAM 的两个 Rayon 工作线程可在 CPU 6、7 并行。其余常驻进程各自限制到一个核心。
+这项检查只需 Matrix 和 Orange Pi。拆桨并让飞控保持上锁，Matrix 的 USB 数据口接 Orange Pi 的 Host 口，Mac 通过另一根 USB 线连 Orange Pi。在板上执行：
 
-| CPU | 进程 |
-|---|---|
-| 0 | ffctl supervisor、firefly-daemon、板端 Mimir、HIL gadget 的 up、serve 和 watchdog |
-| 1 | camera、imu、motor |
-| 2、4 | planner（含深度建图线程） |
-| 3 | depth |
-| 4 | traj、landing、localization |
-| 5 | fc |
-| 6、7 | firefly-rootslam |
+1. 运行 `ls -l /dev/serial/by-id/`，将实际设备路径与 `/opt/firefly/configs/pilot.toml` 的 `device` 对照。
+2. 在空闲台架上用 `ffctl process stop pilot` 停止采集。用 `ffctl process restart firefly-rootslam` 开始一轮独立计数，再用 `ffctl process start pilot` 建立会话。
+3. 查看本次开机运行目录的 `text/pilot.*.log` 和 `text/firefly-rootslam.*.log`。等本轮出现 `Matrix USB session ready` 和 `gravity initialized`，让板子静置至少 120 秒。
+4. 停止 pilot，再重启 RootSLAM。查看刚退出实例的 `IMU accepted=` 汇总和 pilot 的 `stick frames sent`。核对整个窗口只有一次会话，按样本数和实际采集时长估算频率。纯接收测试应有 0 帧杆量。用 `ffctl process start pilot` 恢复采集。[运行目录](mimir.md) · [本批次台架实测](hw/spec.md#飞控电调板)
 
-板上用 `ffctl process status` 查看进程 PID，再用 `taskset -apc <PID>` 核对所有线程的有效亲和性。
+要用 Mac 上的 Betaflight Configurator，先停止 pilot 并等一秒多，再把 Matrix 的 USB 数据线接到 Mac。配置完成后接回 Orange Pi 并启动 pilot。[USB 会话状态图](architecture.md#matrix-usb-会话)
+
+## 板端模型
 
 ### A733 精降模型
 
@@ -104,23 +106,6 @@ python scripts/depth_image.py models/yolo26n-depth/yolo26n-depth.ort input.jpg d
 
 在同一工作目录放置 320 ONNX 和 `scripts/compile_depth_viplite.py`。把选定的 JPEG 或 PNG 标定图片打成 ZIP，用导出环境运行 `python compile_depth_viplite.py --prepare /path/to/calibration.zip`，再在上述 ACUITY 镜像中运行 `python3 compile_depth_viplite.py`。量化迭代次数取自生成的图片清单。将 ONNX 和生成的 NBG 安装到模型目录。本次板测 NBG 的 SHA-256 为 `4dbadb624f071d7a15f5df059a5a39df0bfcf4fe84f1ec2e4ddfe20367677a08`。
 
-## 运行
-
-SIL 和 USB HIL 使用同一份任务计划和 Rust daemon。启动前，xtask 取得运行锁并检查当前工作区是否有占用 IPC 的飞行进程。`cargo xtask processes .` 可以查看匹配的 PID。SIL 在本机启动隔离的任务服务，HIL 通过 USB 请求板上正在运行的 daemon。MuJoCo 物理进程使用 Python。
-
-xtask 顺序提交计划，录制结束后逐架次评分。HIL 使用主机 Mimir，将板端遥测和仿真真值写入同一运行目录下的 RRD 分段。桌面 release 包含独立的 `firefly-verify`，可复制到相同平台的机器上使用。评分器将 JSON 报告写入标准输出，验收通过时返回 0，验收失败或录制无效时返回 1。
-
-```bash
-cargo xtask sil configs/mission-hover.toml
-cargo xtask sil configs/mission-square.toml configs/mission-cuboid.toml
-cargo xtask deploy-hil
-cargo xtask hil configs/mission-square.toml
-target/release/firefly-verify --transport sil <录制路径>
-target/release/firefly-verify --transport board <板上录制路径>
-```
-
-板上录制按运行、任务和架次核对状态、FC 实测模式、架次间上锁区间与 VIO 会话。SIL/HIL 另用仿真真值核对高度、航点和落点。SIL 需要 GPU 与场地资产。同一次调用保持一个 VIO 坐标系。长方体 3 × 2 × 2 米，从 A′ 起笔，最高航点为 3.3 米。SIL 使用 3.7 米顶板，板端使用现场规划配置。计划偏移直接沿 odom 轴声明。首架次完成且落稳上锁后才提交下一架次。
-
 ## 测试
 
 ```bash
@@ -131,7 +116,7 @@ uv run --all-packages --extra test pytest -q -p no:cacheprovider
 cargo test -p firefly-pubsub --test python_interop -- --ignored
 ```
 
-常规 pytest 收集单元测试。系统验收按 `tests/system` 下的文件或用例名显式运行。
+常规 pytest 收集单元测试。已有桌面 release 后，可运行 `uv run pytest tests/system/test_matrix_pilot.py -q`，用伪终端检查 USB 握手、心跳、有效杆量和过期杆量。系统验收按 `tests/system` 下的文件或用例名显式运行。
 有场地资产和图形会话时，先退出其他仿真进程。以下两项分别验证传感器启动和仿真起飞、悬停、降落：
 
 ```bash
@@ -152,3 +137,11 @@ uv run --all-packages --extra test pytest tests/system/test_flight_mission.py te
 | `frozen_original_tracks_match_setup_and_optimizer_stages` | `datasets/basalt-reference/mapper/` 内放同一批次的边缘化缓存 `cache/`、Basalt 的 `tumvi_512_config.json` 和 `tumvi_512_ds_calib.json`，以及用这三项输入运行上游 Mapper 对照程序 `--freeze` 得到的 `frozen.json`。 |
 | `fixed_input_patch_intermediates` | `datasets/basalt-reference/optical_flow_patch_trace.json`，由 C++ 光流探针读取 TUM VI room1 双目数据和对应配置生成。Mapper 与光流探针源码见本仓库提交 `7ffdb4d` 的 `crates/firefly-basalt/tests/reference/{mapper,optical_flow_patch_trace}.cpp`。 |
 | `frozen_single_precision_system_meets_unchanged_gradient_criterion` | `datasets/rootslam-reference/linear_system.json`，使用单精度 LSQR 求解失败时由 `linear_system_archive` 导出的原始矩阵和残差。 |
+
+## Rust 命令行
+
+所有 Rust 应用、`xtask`、示例和自定义基准程序都用 `usage-rs` 解析命令行参数。在所属 crate 的 `[dependencies]` 中写入 `usage-rs.workspace = true`。如果只有示例或基准程序需要解析参数，将这行放在 `[dev-dependencies]`。
+
+在参数结构体上派生 `usage_rs::Cli`，有子命令时在枚举上派生 `usage_rs::Subcommands`。在 `main` 中先调用 `Arguments::parse()`，再读取配置、连接 IPC 或打开设备。这样用户运行 `--help` 时就能直接看到用法。文件路径用 `PathBuf`，默认配置路径用 `firefly_config::paths::config` 取得。可参考[最小示例](../crates/firefly-config/examples/minimal.rs)和 [xtask 的子命令](../xtask/src/main.rs)。
+
+修改 CLI 后，运行对应命令的 `--help` 核对用法，用 `__usage_spec__` 查看参数声明。测试中调用 `parse_from`，检查必填参数、互斥选项和每个选项接受几个值。声明语法见 [usage-rs 参数指南](https://usage.jdx.dev/rust/args-and-flags)。

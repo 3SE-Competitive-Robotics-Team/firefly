@@ -65,17 +65,17 @@ This catalog covers all production topic constants; test topics use isolated nam
 | `Firefly/CameraLeft`, `Firefly/CameraRight` | render/camera → VIO, depth (left), mimir | Lossless grayscale samples when images are enabled |
 | `Firefly/Activity` | Task → landing; HIL priority downlink | 32-byte owner/sequence inference lease, 5 Hz per owner, 8 receive slots and up to 8 owners/publishers; local arrival expiry ≤2s. LANDING requests inference; release/expiry suspends inference work. Phase requests are retained in `logs/flight`; actual resources in `landing/runtime`. Camera acquisition, publication and HIL image transport run continuously. |
 | `Firefly/CameraDown` | render/camera → landing, mimir; OV2640 CIF 352×288, sensor id 3 | Latest-value 101400-byte grayscale input; lossless samples when images are enabled |
-| `Firefly/LandingTarget` | landing → FC, mimir, HIL uplink; odom-frame body contact position | Latest-value 64-byte message; capture time, VIO session, team and validity; recorded as `landing/target` and `landing/quality` |
+| `Firefly/LandingTarget` | landing → simulation pilot, daemon, mimir, HIL uplink; odom-frame body contact position | Latest-value 64-byte message; capture time, VIO session, team and validity; recorded as `landing/target` and `landing/quality` |
 | `Firefly/CameraPair` | render → image consumers | Pair notification; image topics carry the recording |
 | `Firefly/Depth` | YOLO depth → planner-owned EGO mapper | Latest 320×240 float32 axial metres in the left camera frame, with its capture timestamp. HIL computes on board. Offline dataset labels use a separate namespace. |
 | `Firefly/Imu` | Matrix pilot or sim → RootSLAM, simulation controllers | Optional replay observations use the registered `vio/input/*` diagnostic gate |
 | `Firefly/Odometry` | VIO → control, planning, flight scripts and Mimir | Mimir samples initialized local odometry at up to 10 Hz on the measurement clock for `vio/odom` and its display trail |
 | `Firefly/Navigation` | VIO/localization → optional consumers, mimir | Atomic map←odom relation; mimir records changes only and uses bounded startup matching, with poses supplied by their existing observation streams |
 | `Firefly/Reference` | traj → simulation pilot, flight scripts | Flight scripts observe reference goal identity |
-| `Firefly/Sticks` | Stick source → Orange Pi pilot over local IPC, or simulation pilot → Mac fc via IPC/HIL | 16 bytes, queue depth 2, up to 50 Hz over USB. Four primary channels in µs, measurement time in seconds. HIL v13 carries the same 16 bytes, little-endian. Commands expire after 100 ms. |
+| `Firefly/Sticks` | Stick source → Orange Pi pilot over local IPC, or simulation pilot → Mac fc via IPC/HIL | 16 bytes, queue depth 2, up to 50 Hz over USB. Four primary channels in µs. On hardware, the timestamp is in seconds on the Orange Pi monotonic clock. HIL v13 carries the same 16 bytes, little-endian. Commands expire after 100 ms. |
 | `Firefly/Control` | Mac fc → simulated plant | Motor evidence and FC summaries |
 | `Firefly/PlantState`, `Firefly/Airframe` | sim/airframe → FC, system consumers | Optional physical-state evidence; VIO uses camera and IMU observations |
-| `Firefly/Command` | daemon, ffctl, HIL relay → simulation pilot | Three publisher slots. FC consumes the latest request, the HIL bridge buffers up to eight. Results and rejection reasons in event logs. |
+| `Firefly/Command` | daemon, ffctl, HIL relay → simulation pilot | Three publisher slots. The simulation pilot consumes the latest request, the HIL bridge buffers up to eight. Results and rejection reasons in event logs. |
 | `Firefly/FcStatus` | Simulation pilot → daemon, USB HIL and Mimir; `mode` is the native state code, `can_arm` is the FC's latest pre-arm decision (0/1). | V2 IPC type, 24 bytes at up to 10 Hz, one publisher and 16 slots. Mimir records mode and verifies sequence continuity; the existing `fc/arming/failed` observation retains the reason. HIL carries 18 payload bytes. Update all peers together. |
 | `Firefly/Goal` | daemon, ffctl, HIL relay → planner | Three publisher slots. The planner consumes the latest request, the HIL bridge buffers up to four. 80-byte waypoint in local odom coordinates. STOP (0) supports optional terminal yaw in radians (CLI degrees). PASS (1) carries the next xyz position. One sample per task command. |
 | `Firefly/MandatoryStop` | external tools → planner | Stop command; outcome in planner state and logs |
@@ -182,7 +182,7 @@ so the recorder applies the same frame construction as local simulation. Spatial
 retain their source entity, measurement timestamp, active array values and voxel chunk identity.
 Source production gates and cadences remain unchanged; wire encoding carries active elements only.
 The board uses the existing 256-message spatial and 32-message voxel IPC budgets, with at most
-9 spatial publisher slots and one voxel publisher. Control is drained before each diagnostic message;
+10 spatial publisher slots and one voxel publisher. Stick commands are drained before each diagnostic message;
 a maximum-size voxel message occupies up to 196,732 payload bytes (13 USB fragments). The existing
 16 KiB fragment, 512 KiB message and bounded USB queue limits apply. Sequence validation covers
 each source publisher; the host assigns one continuous sequence per forwarded topic.
@@ -191,7 +191,7 @@ fails the run. HIL traffic summaries
 use simulation timestamps; heartbeat deadlines use local monotonic wall time. Retain the complete
 RRD through shutdown and verify transport, posterior coverage and hover limits independently.
 For roundtrip acceptance, the board forwards `Firefly/Reference` and `Firefly/PlannerStatus` on
-the existing bounded USB uplink. Motor owns their latest-value subscriptions and checks control
+the existing bounded USB uplink. The board HIL motor process owns their latest-value subscriptions and checks for new stick commands
 before every telemetry write. Their producer rates remain the planner/traj applications' existing
 cadence (at most 100 Hz each); the two payloads add at most 29.6 kB/s including frame headers.
 Flight scripts observe original measurement and goal timestamps, alignment fields and completion
@@ -345,7 +345,7 @@ columnar Rerun chunks. Typed rows use Rerun's `PendingRow::many_into_chunks` to 
 trajectories and metric cards.
 Count, byte, entity, publisher and voxel budgets are bounded in
 [Options](../apps/firefly/mimir/src/config.rs); [mimir.toml](../configs/mimir.toml) contains overrides.
-All batches flush by row limit or periodic deadline. Typed rows also share the `batch_bytes` memory
+All batches flush at the row limit or the configured deadline (500 ms in the installed configuration). Typed rows also share the `batch_bytes` memory
 budget; reaching it flushes pending rows synchronously. A single oversized row is written directly
 after flushing and releases its temporary storage immediately. Static metadata is written directly.
 Repeated timestamps, order within an entity, field order and values are retained. Clear flushes
@@ -365,64 +365,15 @@ with the standard Rerun viewer.
 
 ### Default viewer layout
 
-[configs/firefly.rbl](../configs/firefly.rbl) is the shared layout for application ID `firefly`.
-Mimir embeds it as the default in each new RRD. Rerun may restore an application-specific user layout;
-load the checked-in RBL explicitly to select the shared layout, or use **Reset to default blueprint**
-on a new recording. Use the workspace viewer to match the recording SDK version:
+Open a run with `cargo xtask view "$run"`. Mimir embeds the [shared blueprint](../configs/firefly.rbl) in each new segment. If Rerun opens a cached layout, select **Reset to default blueprint** or load the RBL explicitly.
 
-```bash
-cargo build --release -p mimir
-./target/release/mimir
-cargo xtask view "$run"
-```
+The map shows ground truth in blue, local odometry in yellow, map-frame navigation in purple, the guide path in green and the local plan in coral. The Down and Stereo views show images at capture time. Landing, Planner and Traj plots use the same measurement timeline. Controller tracking error compares the target to the estimated position. Ground-truth drift requires frame alignment.
 
-The main area shows the map/trajectories and the recorded down camera by default. The neighbouring
-Stereo tab retains the left/right images and track overlays. Down frames live at `cameras/down/image`
-with their capture-time `sim_time`; camera calibration lives at `cameras/down`. With `images=true`,
-Mimir records continuous lossless CIF input throughout takeoff, cruise, hover, return and landing.
-Inference owns its task lifecycle independently of acquisition and recording.
-The mission verifier checks dimensions, payload size, whole-mission coverage, frame-rate cap and
-inference suspension independently of the Viewer layout. Small independent numeric cards
-show FC control frequency (Hz), VIO processing and posterior age (ms), associated landmark IDs,
-camera publication rate (FPS) and capture-to-publication latency (ms). Each card has its own entity and
-view. Ordinary bold text keeps the numbers compact.
-The timeline cursor selects the measurement-time snapshot; a stopped recording holds its last snapshot.
-Missing/nonfinite or more-than-two-second-old values display `—`.
+Numeric cards show the latest value at the cursor. Missing, nonfinite or more-than-two-second-old measurements display `—`. Camera FPS uses strictly increasing `render/capture/publish_s` timestamps over at least one second. The counter ignores repeated or out-of-order timestamps and restarts after a two-second gap. Publication latency comes from `publish_s.total_s` and the landmark count from `vio/diagnostics/tracks.landmark_ids`. The cards add at most twelve document rows per measurement second after initialization.
 
-The lower tab container opens on Landing, with FC/precision state codes, odom-frame target xyz,
-and reprojection error/confidence. Session/team are hidden in the quality plot to keep the numeric
-session identifier off its axis; the original series remain recorded. Planner and Traj have separate tabs. Planner groups callback/FSM Hz,
-FSM/callback/period milliseconds, submitted/adopted planning Hz, and result/solver milliseconds.
-The result plot hides `adopted` (0/1), which remains available in the entity for outcome checks.
-Traj groups sample/publication Hz, sampler/local-IPC latency, and total callback/period milliseconds.
-Different units and scales use separate plots. Timing plots retain the min/max envelope when multiple
-samples occupy one pixel, so callback latency spikes remain visible. The one-second replan threshold uses measurement time.
-Existing camera, VIO and FC panels retain their source observations.
+To change the shared layout, edit the [blueprint generator](../scripts/build_blueprint.py), run `uv run python scripts/build_blueprint.py` and rebuild Mimir. Check the selected entities against the registry and inspect a real recording. For older recordings without `mimir/status/*`, the viewer can use a derived display layer while preserving the source.
 
-Camera FPS counts strictly increasing `render/capture/publish_s` timestamps over at least one second
-of measurement time, using the number of intervals divided by elapsed time. Duplicate/out-of-order
-timestamps leave the counter unchanged; a gap longer than two seconds restarts the window. This is
-the simulated stereo publication cadence; wall-clock throughput, recorder receipt rate and VIO timing
-are separate measurements. It works with image recording disabled; physical camera sources
-lacking this observation display `—`. Publication latency uses `publish_s.total_s`; landmarks use
-`vio/diagnostics/tracks.landmark_ids`. Other cards show the latest source value.
-The display adds at most twelve small document rows per measurement second after its initial snapshot,
-with constant-size state. Full source series and images remain recorded unchanged; load tests verify
-queue budgets, source continuity and final recording completion with these derived cards enabled.
-Tracking/control charts show track IDs, reprojection RMS and controller tracking error; the latter
-is target-versus-estimated-position error. Ground-truth drift is compared from the original GT and VIO trajectories with explicit frame alignment. Timing, estimator details and logs
-are tabs. Thrust and other raw observations remain available in the entity tree.
-
-In the default 3D view, green is the global guide path, coral red is the local planned trajectory
-and its velocity arrows, blue is ground truth, yellow is local odometry, and purple is map-frame
-navigation. The odometry and navigation histories overlap when the navigation correction is identity.
-
-The layout definition is `scripts/build_blueprint.py`. Regenerate `configs/firefly.rbl` with
-`uv run python scripts/build_blueprint.py`, then rebuild mimir to embed it. Mimir and the Viewer
-share this generated layout artifact; shared changes belong in the definition. Before accepting a layout,
-check every selected entity against the observation registry and inspect a real recording screenshot.
-Recordings with source series and missing `mimir/status/*` use a derived display layer for the numeric cards.
-Preserve the original recording when producing that layer.
+### Recorder shutdown
 
 Output paths must be new. After producers stop, SIGINT/SIGTERM drains diagnostic subscriptions until empty
 (including disconnected publishers), drains the owned channel, flushes all batches,

@@ -12,5 +12,4 @@ RMUC MuJoCo 物理进程，由根 uv workspace 管理。
 uv run firefly-sim
 ```
 
-上电保持静止，等待传感器初始化完成后用 `ffctl fc` 解锁和起飞。
-完整仿真见[运行说明](../../../docs/development.md#运行)。
+单独启动时，物理进程会等待控制输入。要运行包含传感器、pilot、模拟飞控和任务服务的悬停试验，使用[开发指南中的 SIL 命令](../../../docs/development.md#运行)。

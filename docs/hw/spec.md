@@ -1,40 +1,16 @@
 # 硬件设计规格
 
-## SoC
-
-| 项 | 规格 |
-|---|---|
-| SoC | Allwinner A733，12nm |
-| CPU | 8 核：2× Arm Cortex-A76 + 6× Arm Cortex-A55 |
-| 主频 | A76 最高 2.0GHz，A55 最高 1.8GHz；板端 cpu6/7 上限 2.002GHz，cpu0–5 上限 1.794GHz |
-| 协处理器 | RISC-V E902 @ 200MHz |
-| GPU | Imagination BXM-4-64 |
-| NPU | 3 TOPS |
-| 内存 | LPDDR5，4GB |
-| 视频 | 解码最高 8K@24fps（H.265/VP9/AVS2），编码最高 4K@30fps（H.265/H.264） |
-
-## 接口
-
-| 项 | 规格 |
-|---|---|
-| 存储 | eMMC 8/16/32GB、UFS 32/64/128GB 可选（均空贴）；TF 卡最高 128GB |
-| 无线 | Wi-Fi 6 + 蓝牙 5.4（含 BLE） |
-| 显示 | HDMI 2.0（4K@60）、MIPI-DSI 4-lane、DP 1.4 |
-| 摄像头 | 2× 4-lane MIPI-CSI |
-| USB | 1× Type-C USB 3.0 Host；1× Type-C USB 2.0（Host/Device） |
-| 扩展 | 40Pin（GPIO/UART/I2C/SPI/PWM）、3Pin DEBUG 串口、风扇接口 |
-| 供电 | Type-C 5V/3A |
-| 尺寸 | 65 × 30mm，14g |
-| 系统 | Ubuntu / Debian / Android 13 |
-
 ## 开发板
 
-| 项 | 规格 |
+实板为 Orange Pi Zero 3W。台架上，Mac 通过 USB 2.0 Device 口管理 Orange Pi，Matrix 接 Orange Pi 的 USB 3.0 Host 口。[部署和台架检查](../development.md#验证-matrix-imu)
+
+| 项目 | 本机规格 |
 |---|---|
-| 型号 | Orange Pi Zero 3W |
-| 内存 | 3.8GiB 可用 |
-| 存储 | 仅 TF 卡（59.7GB），eMMC/UFS 未贴片 |
-| GPU | `/dev/dri` 存在（DRM） |
+| SoC | Allwinner A733，6 核 Cortex-A55（cpu0–5，上限 1.794 GHz）和 2 核 Cortex-A76（cpu6–7，上限 2.002 GHz） |
+| 内存与存储 | 4 GB LPDDR5，可用 3.8 GiB。系统装在 59.7 GB TF 卡，eMMC 和 UFS 均未贴片 |
+| 图形和推理 | Imagination BXM-4-64，板上可见 `/dev/dri`。NPU 标称 3 TOPS |
+| 摄像头与 USB | 两路 4-lane MIPI-CSI。一个 Type-C USB 3.0 Host，一个 Type-C USB 2.0 Host/Device |
+| 供电与尺寸 | Type-C 5 V / 3 A，65 × 30 mm，14 g |
 
 ## 动力
 
@@ -63,7 +39,7 @@
 | 项 | 规格 |
 |---|---|
 | 前视双目 | 左右各接一路 MIPI-CSI，同步和并发采集待板端验证 |
-| 下视相机 | OV2640，CIF 352×288，用于精降。通过 DVP 转 USB 桥接入 USB 3.0 Host，待验证桥接驱动及 V4L2 YUYV 输出 |
+| 下视相机 | OV2640，CIF 352×288，用于精降。通过 DVP 转 USB 桥接入 USB 3.0 Host，需验证与 Matrix 共用 Host 口时的连接方式、桥接驱动及 V4L2 YUYV 输出 |
 | 下视安装 | 光轴向下，光心位于机体原点后方 3 cm，外参以装机标定为准 |
 
 ## Planner 深度

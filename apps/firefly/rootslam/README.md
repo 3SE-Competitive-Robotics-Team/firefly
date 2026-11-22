@@ -5,6 +5,8 @@ RootSLAM provides calibrated stereo/IMU odometry through one application:
 sources run public datasets through the same Basalt estimator. Persistent mapping,
 loop closure and final global BA are available for dataset evaluation.
 
+For a connected Matrix, use the [two-minute IMU check](../../../docs/development.md#验证-matrix-imu). For stereo tracking and IPC configuration, see [online operation](#online-operation-and-validation).
+
 ## Public-dataset evaluation
 
 Run commands from the workspace root. Prepare the dataset and its matching
@@ -174,29 +176,7 @@ application duration describe separate workloads.
 
 ### Reference measurements
 
-The 2026-11-10–11 M5 measurements use commit `ecf5cbd`, full sequences, grid size
-20, mapping/loops/global BA enabled, and one run per precision. Values below are
-final SE(3) ATE RMSE in centimetres, FP64 / FP32.
-
-| Dataset | Measured sequences | Final ATE and completion |
-|---|---|---|
-| LaMAria | R_01_easy | Initial global linearization error in both runs; local ATE 74.82 / 83.52 |
-| UZH FPV, official calibration | indoor_forward_3; indoor_forward_6 | 36.28 / 31.65; 135.35 / 136.08 |
-| UZH FPV, per-sequence candidate calibration | Same two sequences | 30.13 / 25.17; 21.65 / 20.84; in-sample calibration diagnostics |
-| TUM-VI | room1–6 | room2–6: 0.84–1.40 / 0.82–1.30; room1 initial global linearization error |
-| EuRoC | V1_01, V1_02, V1_03 | 4.19 / 4.39; 4.80 / 4.35; 6.01 / 6.16 |
-
-Across 28 formal runs, local frame coverage is complete: 9 global solves converged,
-15 exported a complete trajectory at the iteration limit, and 4 stopped at initial
-linearization. Both EuRoC medium/difficult runs reached the iteration limit.
-[Issue #149](https://github.com/3SE-Competitive-Robotics-Team/firefly/issues/149)
-contains per-condition status, performance evidence and the precision work items.
-
-The [RootSLAM paper](https://arxiv.org/html/2610.15157v1) reports EuRoC V1 mean ATE
-3.8 cm and TUM room mean 0.9 cm. Our V1 means are 5.00 / 4.97 cm; the room group
-currently has five final trajectories per precision. The measured V1 global BA
-means are 40.62 / 27.82 s; the paper reports 2.34 / 1.20 s on an i5-13600.
-Hardware, map inputs, stopping policy and timing boundaries accompany these values.
+The M5 reference run at `ecf5cbd` used full sequences, grid size 20, mapping, loops and global bundle adjustment. All 28 runs covered the local frames. Nine global solves converged, 15 exported a trajectory at the iteration limit, and four stopped at initial linearization. Compare accuracy together with solver status, precision and calibration. Per-sequence errors, timings and run conditions are in [issue #149](https://github.com/3SE-Competitive-Robotics-Team/firefly/issues/149).
 
 ## Configuration and clocks
 

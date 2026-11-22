@@ -26,8 +26,11 @@ make -C apps/third-party/betaflight/src/test -f ../../../betaflight-build/tests.
     CC=/usr/bin/clang CXX=/usr/bin/clang++ test
 ```
 
-在 Orange Pi 上将已上锁的 Matrix 接到 USB Host，使用 Python 3 读取 IMU。将设备路径换成实际枚举出的 CDC 设备。工具负责握手并每 250 ms 发送心跳，每秒显示一个样本。按 Ctrl-C 退出，等待一秒多后即可使用 Configurator。
+日常检查可直接看 [pilot 和 RootSLAM 的台架日志](../../docs/development.md#验证-matrix-imu)。要单独检查固件，在 Orange Pi 上停止 pilot，将已上锁的 Matrix 接到 USB Host。从板上的源码目录运行以下脚本，或将脚本复制到板上并使用对应路径。设备名以实际枚举结果为准。
 
 ```sh
+ffctl process stop pilot
 python3 apps/third-party/betaflight-build/read_imu.py /dev/ttyACM0
 ```
+
+脚本每 250 ms 发送心跳，每秒显示一个样本。按 Ctrl-C 退出，等一秒多，再用 `ffctl process start pilot` 恢复采集。
