@@ -17,4 +17,4 @@
 - 修改、构建、运行或验证项目：阅读并遵守 [开发指南](docs/development.md) 的相关章节。
 - 修改系统职责、坐标或算法：同时阅读 [系统架构](docs/architecture.md)。
 - 新增、修改、删除 topic、日志、trace、诊断或 RRD 实体：先读 [可观测性](docs/observability.md)，完成登记、生产开关、预算与完整性验证；超载修复以生产和消费成本为依据，保持已登记数据及队列预算。
-- 公开数据集测评：沿用 [RootSLAM 测评指南](apps/rootslam/README.md) 的入口、配置与评分口径；数据集、下载清单和运行证据保存在本地产物目录。
+- 公开数据集测评：沿用 [RootSLAM 测评指南](apps/firefly/rootslam/README.md) 的入口、配置与评分口径；数据集、下载清单和运行证据保存在本地产物目录。

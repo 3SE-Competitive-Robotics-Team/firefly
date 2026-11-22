@@ -22,12 +22,12 @@ flowchart TB
 
 | 业务域 | 状态归属与决策 | 主要实现 |
 |---|---|---|
-| 任务管理 | 接受计划、记录起飞锚点、分配架次号、推进阶段和航点、持久化回执。模式是否生效以 FC 回报为准。 | [任务协议](../crates/firefly-mission/src/lib.rs)、[daemon](../apps/firefly-daemon/src/flight.rs)、[消息端口](../apps/firefly-daemon/src/bus.rs) |
-| 设备接入与执行 | 为图像和惯性测量保留采集时间。普通板端 motor 发布机体参数，把四路推力换算到 PWM；仿真端由物理模型响应推力。 | [camera](../apps/camera/src/capture.rs)、[imu](../apps/imu/src/source.rs)、[motor](../apps/motor/src/actuator.rs) |
-| 状态估计与环境感知 | RootSLAM 拥有本次运行的局部位姿与速度；depth 拥有单帧深度预测；landing 拥有精降目标的几何估计、跟踪与有效性。 | [RootSLAM](../apps/rootslam/src/online.rs)、[depth](../apps/depth/src/main.rs)、[landing](../apps/landing/src/tracking.rs) |
-| 局部建图与运动规划 | planner 拥有局部占据图、碰撞快照、规划状态和获采纳的轨迹，判定途经点通过并回报目标身份。 | [深度融合](../apps/planner/src/depth_mapping.rs)、[规划入口](../apps/planner/src/main.rs)、[位置与航向协调](../crates/firefly-planner/src/motion.rs) |
-| 轨迹执行与飞行控制 | traj 在测量时钟上采样已提交的曲线；FC 裁决解锁、跟踪、降落和失效处置，计算四路电机推力。 | [采样器](../crates/firefly-planner/src/traj_server.rs)、[FC](../apps/fc/src/main.rs)、[飞行模式](../crates/firefly-flight/src/fsm.rs) |
-| 运行支撑与验证 | systemd 和 ffctl 管理进程；xtask 编排试验；Mimir 归档观测；verify 独立判断任务和飞行质量。 | [部署](../xtask/src/deploy.rs)、[试验编排](../xtask/src/mission.rs)、[Mimir](../apps/mimir/README.md)、[评分器](../apps/firefly-verify/src/lib.rs) |
+| 任务管理 | 接受计划、记录起飞锚点、分配架次号、推进阶段和航点、持久化回执。模式是否生效以 FC 回报为准。 | [任务协议](../crates/firefly-mission/src/lib.rs)、[daemon](../apps/firefly/firefly-daemon/src/flight.rs)、[消息端口](../apps/firefly/firefly-daemon/src/bus.rs) |
+| 设备接入与执行 | 为图像和惯性测量保留采集时间。普通板端 motor 发布机体参数，把四路推力换算到 PWM；仿真端由物理模型响应推力。 | [camera](../apps/firefly/camera/src/capture.rs)、[imu](../apps/firefly/imu/src/source.rs)、[motor](../apps/firefly/motor/src/actuator.rs) |
+| 状态估计与环境感知 | RootSLAM 拥有本次运行的局部位姿与速度；depth 拥有单帧深度预测；landing 拥有精降目标的几何估计、跟踪与有效性。 | [RootSLAM](../apps/firefly/rootslam/src/online.rs)、[depth](../apps/firefly/depth/src/main.rs)、[landing](../apps/firefly/landing/src/tracking.rs) |
+| 局部建图与运动规划 | planner 拥有局部占据图、碰撞快照、规划状态和获采纳的轨迹，判定途经点通过并回报目标身份。 | [深度融合](../apps/firefly/planner/src/depth_mapping.rs)、[规划入口](../apps/firefly/planner/src/main.rs)、[位置与航向协调](../crates/firefly-planner/src/motion.rs) |
+| 轨迹执行与飞行控制 | traj 在测量时钟上采样已提交的曲线；FC 裁决解锁、跟踪、降落和失效处置，计算四路电机推力。 | [采样器](../crates/firefly-planner/src/traj_server.rs)、[FC](../apps/firefly/fc/src/main.rs)、[飞行模式](../crates/firefly-flight/src/fsm.rs) |
+| 运行支撑与验证 | systemd 和 ffctl 管理进程；xtask 编排试验；Mimir 归档观测；verify 独立判断任务和飞行质量。 | [部署](../xtask/src/deploy.rs)、[试验编排](../xtask/src/mission.rs)、[Mimir](../apps/firefly/mimir/README.md)、[评分器](../apps/firefly/firefly-verify/src/lib.rs) |
 
 ## 机载数据流
 
@@ -51,7 +51,7 @@ flowchart TB
     fc -->|Control| motor["motor / 仿真机体"]
 ```
 
-任务与飞控各自维护状态机。daemon 同时读取机体参数、估计会话、FC 模式、规划心跳、规划状态、轨迹参考和降落目标。以下反馈解释了“已发送指令”和“已执行阶段”在接口上的区别。[daemon 消息端口](../apps/firefly-daemon/src/bus.rs) · [topic 目录](observability.md#ipc-topic-catalog)
+任务与飞控各自维护状态机。daemon 同时读取机体参数、估计会话、FC 模式、规划心跳、规划状态、轨迹参考和降落目标。以下反馈解释了“已发送指令”和“已执行阶段”在接口上的区别。[daemon 消息端口](../apps/firefly/firefly-daemon/src/bus.rs) · [topic 目录](observability.md#ipc-topic-catalog)
 
 ```mermaid
 flowchart LR
@@ -75,7 +75,7 @@ flowchart LR
 | `map` 与 `world` | `Navigation` 携带地图对里程计的对齐。可选外部定位用 `PoseObservation` 与局部里程计更新对齐；启用时由 localization 独占导航和校正里程计发布。`world` 是模拟器真值系，评分器以首架次起飞锚点建立固定对齐。 |
 | 测量时间与运行时间 | 图像配对、位姿插值、轨迹采样使用测量时间，RRD 以 `sim_time` 保存；新鲜度、看门狗和耗时采用进程单调时钟。RRD 的 `wall_time` 保存墙钟时间。 |
 
-RootSLAM 的可选稀疏地标地图服务于定位；planner 的局部占据图服务于碰撞查询，来自深度帧和里程计。USB HIL 关闭 RootSLAM 的稀疏建图和回环，同时运行 planner 的深度建图。[在线估计配置](../apps/rootslam/README.md#online-operation-and-validation) · [外部定位](../apps/localization/src/main.rs) · [HIL 进程清单](../configs/processes-hil.toml) · [评分对齐](../apps/firefly-verify/src/flight.rs)
+RootSLAM 的可选稀疏地标地图服务于定位；planner 的局部占据图服务于碰撞查询，来自深度帧和里程计。USB HIL 关闭 RootSLAM 的稀疏建图和回环，同时运行 planner 的深度建图。[在线估计配置](../apps/firefly/rootslam/README.md#online-operation-and-validation) · [外部定位](../apps/firefly/localization/src/main.rs) · [HIL 进程清单](../configs/processes-hil.toml) · [评分对齐](../apps/firefly/firefly-verify/src/flight.rs)
 
 ### 图像进入闭环后的处理
 
@@ -187,6 +187,6 @@ flowchart TB
 
 1. daemon 将请求和阶段写入任务回执，Mimir 把任务事件、机载状态和配置写入本次运行目录的 `rrd/` 分段。前者供服务恢复，后者供回放与验收。板端按开机身份归档，同一次桌面命令的子进程共享运行目录。
 2. verify 按运行、任务和架次检查阶段顺序、会话与 FC 实测模式。SIL/HIL 再把 `odom` 目标变换到仿真 `world`，计算途经点距离与速度、返航误差及落地后的稳定性。
-3. xtask 核对提交结果、进程退出、任务 ID 和评分器退出状态。Rerun 可沿同一测量时间查看图像、估计、轨迹与真值，定位哪一步产生了偏差。[录制契约](mimir.md) · [真值评分](../apps/firefly-verify/src/flight.rs) · [运行入口](development.md#运行)
+3. xtask 核对提交结果、进程退出、任务 ID 和评分器退出状态。Rerun 可沿同一测量时间查看图像、估计、轨迹与真值，定位哪一步产生了偏差。[录制契约](mimir.md) · [真值评分](../apps/firefly/firefly-verify/src/flight.rs) · [运行入口](development.md#运行)
 
-公开数据集沿 RootSLAM 的离线入口评估定位，可独立开启稀疏建图、回环与全局优化。CAD 与 MuJoCo 场景包提供机体和场地资产；`quad` 是复用控制核心的独立交互演示。三者在仓库中分别承担算法对照、资产准备和演示职责。[数据集测评](../apps/rootslam/README.md) · [CAD](../packages/firefly-cad/README.md) · [quad](../apps/quad/README.md)
+公开数据集沿 RootSLAM 的离线入口评估定位，可独立开启稀疏建图、回环与全局优化。CAD 与 MuJoCo 场景包提供机体和场地资产；`quad` 是复用控制核心的独立交互演示。三者在仓库中分别承担算法对照、资产准备和演示职责。[数据集测评](../apps/firefly/rootslam/README.md) · [CAD](../packages/firefly-cad/README.md) · [quad](../apps/firefly/quad/README.md)

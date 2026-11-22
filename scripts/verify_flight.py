@@ -9,6 +9,6 @@ if __name__ == "__main__":
     binary = root / "target/release/firefly-verify"
     if binary.is_file():
         os.execv(binary, [str(binary), *sys.argv[1:]])
-    manifest = root / "apps/firefly-verify/Cargo.toml"
+    manifest = root / "apps/firefly/firefly-verify/Cargo.toml"
     os.execvp("cargo", ["cargo", "run", "--quiet", "--release", "--manifest-path", str(manifest),
                         "--bin", "firefly-verify", "--", *sys.argv[1:]])

@@ -6,14 +6,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_application_topics_are_not_private_contracts():
-    for source in (ROOT / "apps").rglob("*.rs"):
+    for source in (ROOT / "apps/firefly").rglob("*.rs"):
         assert not re.search(r'const \w+_TOPIC: &str = "Firefly/', source.read_text()), source
 
 
 def test_default_blueprint_only_selects_registered_observations():
     from rerun.chunk import RrdReader
 
-    registered = set(re.findall(r'"([a-z][a-z_/]+)"', (ROOT / "apps/mimir/src/schema.rs").read_text()))
+    registered = set(re.findall(r'"([a-z][a-z_/]+)"', (ROOT / "apps/firefly/mimir/src/schema.rs").read_text()))
     registered.add("logs")
     reader = RrdReader(ROOT / "configs/firefly.rbl")
     [store] = reader.blueprints()

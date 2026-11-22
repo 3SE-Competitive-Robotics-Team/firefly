@@ -315,7 +315,7 @@ fn localization_correction_invalidates_trajectory_preserving_goal_and_stop() {
 fn rmuc_22m_initial_trajectory_is_executable() {
     let file = firefly_map::MapFile::from_file(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../apps/planner/maps/rmuc2027-1.0.0.ffmap"),
+            .join("../../apps/firefly/planner/maps/rmuc2027-1.0.0.ffmap"),
     )
     .unwrap();
     let mut map = file.to_grid_map(0.4).unwrap();

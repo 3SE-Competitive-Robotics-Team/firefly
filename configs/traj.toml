@@ -1,2 +1,2 @@
 # traj 独立采样完整位置/航向轨迹并发布飞控参考。
-# 字段与默认值见 apps/traj/src/config.rs。
+# 字段与默认值见 apps/firefly/traj/src/config.rs。

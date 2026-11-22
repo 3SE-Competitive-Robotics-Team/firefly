@@ -19,7 +19,7 @@ firefly-mujoco = { workspace = true }
 firefly-sim = { workspace = true }
 
 [tool.uv.workspace]
-members = ["packages/*", "apps/firefly-sim"]
+members = ["packages/*", "apps/firefly/firefly-sim"]
 
 [dependency-groups]
 dev = [
@@ -31,4 +31,4 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "apps", "packages"]
+testpaths = ["tests", "apps/firefly", "packages"]

@@ -1,4 +1,4 @@
-# 主机侧 USB HIL 桥（apps/hil）；默认值见 src/config.rs。
+# 主机侧 USB HIL 桥（apps/firefly/hil）；默认值见 src/config.rs。
 # 板端 gadget 由 `hil-gadget up` 建立，接口/端点按描述符自动发现。
 
 [usb]

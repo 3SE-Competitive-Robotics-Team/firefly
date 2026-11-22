@@ -13,7 +13,7 @@ Every observation change must include these steps in the same review:
 2. Use business topics for business data, `Firefly/VizScalars` for numeric diagnostics,
    `Firefly/Viz` for spatial diagnostics, `Firefly/VizVoxels` for maps, and `Firefly/Log` for human-readable events.
    Structured observations carry per-point data; TextLog carries bounded events. Business payloads describe their consumers' data needs.
-3. Register numeric fields, order and units in [mimir/schema.rs](../apps/mimir/src/schema.rs).
+3. Register numeric fields, order and units in [mimir/schema.rs](../apps/firefly/mimir/src/schema.rs).
    Register spatial paths and allowed payload kinds there too. Unknown paths, kinds and widths fail recording.
    Dynamic paths use bounded syntax; frame and landmark identities belong in component fields.
 4. Update the topic and observation-group catalog below with owner, consumer, clock, frame and enabling condition.
@@ -341,7 +341,7 @@ then releases the loan. A single writer groups scalar and typed observation rows
 columnar Rerun chunks. Typed rows use Rerun's `PendingRow::many_into_chunks` to group images, poses,
 trajectories and metric cards.
 Count, byte, entity, publisher and voxel budgets are bounded in
-[Options](../apps/mimir/src/config.rs); [mimir.toml](../configs/mimir.toml) contains overrides.
+[Options](../apps/firefly/mimir/src/config.rs); [mimir.toml](../configs/mimir.toml) contains overrides.
 All batches flush by row limit or periodic deadline. Typed rows also share the `batch_bytes` memory
 budget; reaching it flushes pending rows synchronously. A single oversized row is written directly
 after flushing and releases its temporary storage immediately. Static metadata is written directly.

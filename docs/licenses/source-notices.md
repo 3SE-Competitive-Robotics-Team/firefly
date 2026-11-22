@@ -9,9 +9,9 @@
 
 | 文件 | 声明编号 |
 |---|---|
-| [apps/rootslam/src/dataset_output.rs](../../apps/rootslam/src/dataset_output.rs) | 49 |
-| [apps/rootslam/src/dataset.rs](../../apps/rootslam/src/dataset.rs) | 1, 48 |
-| [apps/rootslam/src/simulation.rs](../../apps/rootslam/src/simulation.rs) | 50 |
+| [apps/firefly/rootslam/src/dataset_output.rs](../../apps/firefly/rootslam/src/dataset_output.rs) | 49 |
+| [apps/firefly/rootslam/src/dataset.rs](../../apps/firefly/rootslam/src/dataset.rs) | 1, 48 |
+| [apps/firefly/rootslam/src/simulation.rs](../../apps/firefly/rootslam/src/simulation.rs) | 50 |
 | [crates/firefly-basalt/src/hash_bow/hash_bow.rs](../../crates/firefly-basalt/src/hash_bow/hash_bow.rs) | 2 |
 | [crates/firefly-basalt/src/image/image_pyr.rs](../../crates/firefly-basalt/src/image/image_pyr.rs) | 3, 51 |
 | [crates/firefly-basalt/src/imu/imu_types.rs](../../crates/firefly-basalt/src/imu/imu_types.rs) | 3, 52 |

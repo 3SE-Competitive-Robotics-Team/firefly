@@ -50,11 +50,12 @@
 | 电池 | 1S 18650 或 21700，满充 4.2 V |
 | 飞控电调板 | BETAFPV Matrix 1S 5IN1 II 免焊版（Solder-free，`01040020_1`），电池直供，四个 JST 1.25 mm 三针电机座。[厂商规格](https://betafpv.com/products/matrix-1s-5in1-ii-brushless-flight-controller) |
 | 机载电源 | 独立升压支路与电调共地，经 Type-C 输出 5 V / 3 A。输入 3.0 V、效率 90% 时约取 5.6 A，电池预算另计电机 |
-| 主板通信 | 拟用 Matrix 的 UART1（TX1/RX1），与 Orange Pi 交叉连接 TX/RX 并共地。核对板卡批次的焊盘、逻辑电平和端口占用后，在 Betaflight Ports 启用 MSP，两端波特率一致 |
-| 上位机指令 | Orange Pi 通过 MSP v1 `MSP_SET_RAW_RC`（200）持续下发横滚、俯仰、偏航与油门通道，通道顺序按 Receiver 映射核对 |
-| 电机控制 | Betaflight 负责姿态控制、混控和板内 DShot；Firefly 的上位机控制需适配 RC 通道接口 |
-| 控制权 | `RX_MSP` 单独接收仅用于拆桨台架。飞行设计由 ELRS 遥控器保留解锁与接管，Orange Pi 经 MSP Override 接管选定通道。具体批次的原厂固件是否包含所需功能待确认，通道映射和断线接管须通过拆桨验证。[Betaflight MSP 接入指南](https://betaflight.com/docs/wiki/guides/current/MSP-Companion-Computer-Control) |
-| IMU | 由控制侧 3.3 V 稳压输出供电，核对模块电压和稳压器余量 |
+| 飞控固件 | [3SE 的 Betaflight fork](../../apps/third-party/betaflight) 以实板原厂版本 `2026.6.0-alpha`（`e92c10887`）和板级配置 `BETAFPVG473_V2`（`6703db5`）为基线。该批次使用 BMI270、内部时钟和 `align_board_yaw = -135`。[厂商 BMI270 固件说明](https://support.betafpv.com/hc/en-us/articles/54655791332761-Firmware-for-Matrix-1S-Brushless-Flight-Controller-5IN1-II) |
+| 主板通信 | 拟用 Matrix 的 UART1 与 Orange Pi 双向传输。TX1 接 Orange Pi 的 RX，RX1 接 TX，两板共地。接线前核对焊盘、逻辑电平和端口占用 |
+| 串口协议 | 自研 [`firefly_serial_protocol`](../../apps/third-party/betaflight/docs/firefly_serial_protocol.md)。第一版通过 UART1 以 460800 baud、8N1 传输 IMU 样本和遥控通道指令。Orange Pi 端接入和实板联调待完成 |
+| IMU | Matrix 随 BMI270 加速度计更新主动上报三轴加速度、三轴角速度和飞控读取快照的时间。任务标称 800 Hz，每帧 20 字节，实际到达率和抖动待板测 |
+| 电机控制 | Orange Pi 下发横滚、俯仰、偏航和油门指令。Betaflight 负责姿态控制、混控和板内 DShot 输出 |
+| 控制权 | ELRS 遥控器保留解锁和人工接管权。通道映射、人工接管和串口断线行为须通过拆桨验证 |
 | 定型依据 | 实测 1207 桨的电流与静推力、整机悬停余量，以及低电量下四电机同时加速时的 5 V 电压 |
 
 ## 相机

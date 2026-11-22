@@ -1,4 +1,4 @@
-# apps/render 视觉配置：场景光照（所有视角共用一份）+ 相机曝光。
+# apps/firefly/render 视觉配置：场景光照（所有视角共用一份）+ 相机曝光。
 # 场景在 configs/scene.toml。
 [light]
 # 场景三方向光照度（lux）：与相机曝光一起决定画面亮度。

@@ -193,14 +193,14 @@ def main(argv=None):
     parser.add_argument("stp", type=Path)
     parser.add_argument("--scene", required=True, help="场景标识，如 rmuc2027@1.0.0")
     parser.add_argument("--out-dir", type=Path, help="缺省 models/<season>/v<version>")
-    parser.add_argument("--map-out", type=Path, help="缺省 apps/planner/maps/<season>-<version>.ffmap")
+    parser.add_argument("--map-out", type=Path, help="缺省 apps/firefly/planner/maps/<season>-<version>.ffmap")
     parser.add_argument("--config", type=Path, default=ROOT / "configs/cad.toml")
     parser.add_argument("--blender", default="blender")
     args = parser.parse_args(argv)
     scene = parse_scene(args.scene)
     options = startup(args.config, decode_options)
     out_dir = args.out_dir or ROOT / scene.dir
-    map_out = args.map_out or ROOT / "apps/planner/maps" / scene.map
+    map_out = args.map_out or ROOT / "apps/firefly/planner/maps" / scene.map
     build(args.stp, scene, out_dir, map_out, options, args.blender)
     return 0
 

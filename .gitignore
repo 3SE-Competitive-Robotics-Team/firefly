@@ -18,9 +18,9 @@ wheels/
 # 文档与地图资源
 docs/papers/
 docs/reference/
-apps/planner/maps/*.ffmap
-apps/planner/maps/*.ffvmap
-apps/planner/maps/*.manifest.json
+apps/firefly/planner/maps/*.ffmap
+apps/firefly/planner/maps/*.ffvmap
+apps/firefly/planner/maps/*.manifest.json
 
 # 录制产物（rrd/rbl）与运行时日志
 /logs/
@@ -28,7 +28,7 @@ apps/planner/maps/*.manifest.json
 
 # 本地数据集目录与下载清单
 /datasets/
-/apps/rootslam/benchmarks.json
+/apps/firefly/rootslam/benchmarks.json
 
 # 神经网络权重（大二进制，离线下载进 models/，不进 git）
 /models/

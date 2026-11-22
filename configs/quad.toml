@@ -1,4 +1,4 @@
-# 微无人机第三人称飞行（apps/quad）：独立 6-DOF 四旋翼，不接 IPC / VIO。
+# 微无人机第三人称飞行（apps/firefly/quad）：独立 6-DOF 四旋翼，不接 IPC / VIO。
 # 机体、旋翼布局与 PX4 控制参数见 crates/firefly-flight。
 
 [control.rate]

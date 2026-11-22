@@ -1,0 +1,6 @@
+[submodule "apps/third-party/betaflight"]
+	path = apps/third-party/betaflight
+	url = https://github.com/3SE-Competitive-Robotics-Team/betaflight.git
+[submodule "apps/tools/se3-mono"]
+	path = apps/tools/se3-mono
+	url = https://github.com/3SE-Competitive-Robotics-Team/se3-mono.git

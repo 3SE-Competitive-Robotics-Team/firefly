@@ -1,4 +1,4 @@
-# firefly-imu 配置；缺键回落代码默认值（apps/imu/src/source.rs）。
+# firefly-imu 配置；缺键回落代码默认值（apps/firefly/imu/src/source.rs）。
 # BMI088 是同一封装内的两片 SPI 从机：加速度计与陀螺各占一条片选。
 
 [accel]

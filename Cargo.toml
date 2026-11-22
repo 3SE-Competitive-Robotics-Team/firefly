@@ -1,6 +1,6 @@
 [workspace]
-members = ["crates/*", "apps/*", "xtask"]
-exclude = ["apps/firefly-sim"]
+members = ["crates/*", "apps/firefly/*", "xtask"]
+exclude = ["apps/third-party/betaflight", "apps/firefly/firefly-sim"]
 resolver = "3"
 
 # RootSLAM 的逐帧数值循环依赖跨函数内联。单代码生成单元让 LLVM 在整 crate

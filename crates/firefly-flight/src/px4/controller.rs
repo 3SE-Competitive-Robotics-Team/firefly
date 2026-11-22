@@ -199,7 +199,7 @@ impl Controller {
     }
 
     /// 手动姿态模式：给定产品系期望姿态、归一化集合推力与偏航角速度，走
-    /// 姿态 → 角速度 → 分配三层（`apps/quad` 的第三人称飞行）。
+    /// 姿态 → 角速度 → 分配三层（`apps/firefly/quad` 的第三人称飞行）。
     ///
     /// `attitude_sp` 为产品 body→world（FLU）；`thrust` 为 `[0,1]` 归一化集合推力；
     /// `yaw_rate` 绕产品世界 `+Z`（rad/s）。返回 4 电机推力（N）。

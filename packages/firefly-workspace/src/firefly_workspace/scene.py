@@ -32,7 +32,7 @@ class SceneId:
 
     @property
     def map(self) -> str:
-        """`apps/planner/maps/` 下的规划地图名。"""
+        """`apps/firefly/planner/maps/` 下的规划地图名。"""
         return f"{self.season}-{self.version}.ffmap"
 
 

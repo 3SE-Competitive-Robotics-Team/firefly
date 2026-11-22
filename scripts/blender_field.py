@@ -27,7 +27,7 @@ Roughness（[`ROUGH_LO`, `ROUGH_HI`]）表现大平面的粗糙度变化。灯�
 保持自发光外观。
 
 坐标：npz 已是 `MuJoCo` 世界系（米，Z 上、地面 z=0）。Blender 内部同为 Z 上，
-导出必须 `export_yup=False`，否则 glTF 规范的 Y 上转换会让场地相对 `apps/render`
+导出必须 `export_yup=False`，否则 glTF 规范的 Y 上转换会让场地相对 `apps/firefly/render`
 的 Z 上 rig 立起来。
 """
 

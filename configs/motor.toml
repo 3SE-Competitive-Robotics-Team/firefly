@@ -1,4 +1,4 @@
-# firefly-motor 配置；缺键回落代码默认值（apps/motor/src/actuator.rs）。
+# firefly-motor 配置；缺键回落代码默认值（apps/firefly/motor/src/actuator.rs）。
 # 本进程把 Firefly/Control 的牛顿映射成 sysfs PWM 脉宽，并按 airframe 周期性
 # 发布 Firefly/Airframe（板端被控对象属性的唯一来源）。
 

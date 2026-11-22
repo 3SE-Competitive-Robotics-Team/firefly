@@ -87,7 +87,7 @@ dev = [
 requires-dist = [
     { name = "firefly-ipc", editable = "packages/firefly-ipc" },
     { name = "firefly-mujoco", editable = "packages/firefly-mujoco" },
-    { name = "firefly-sim", editable = "apps/firefly-sim" },
+    { name = "firefly-sim", editable = "apps/firefly/firefly-sim" },
     { name = "firefly-workspace", editable = "packages/firefly-workspace" },
 ]
 
@@ -150,7 +150,7 @@ requires-dist = [
 [[package]]
 name = "firefly-sim"
 version = "0.1.0"
-source = { editable = "apps/firefly-sim" }
+source = { editable = "apps/firefly/firefly-sim" }
 dependencies = [
     { name = "firefly-ipc" },
     { name = "firefly-mujoco" },

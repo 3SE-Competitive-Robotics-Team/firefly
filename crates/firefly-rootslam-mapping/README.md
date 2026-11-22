@@ -4,7 +4,7 @@ Persistent sparse mapping, loop verification, pose-graph optimization and global
 bundle adjustment based on the [RootSLAM paper](https://arxiv.org/abs/2610.15157).
 This crate is an independent implementation. Algorithm provenance is recorded in
 the [license index](../../docs/licenses/README.md); dataset procedures and measured
-results are in the [RootSLAM guide](../../apps/rootslam/README.md).
+results are in the [RootSLAM guide](../../apps/firefly/rootslam/README.md).
 
 ## Map constraints
 

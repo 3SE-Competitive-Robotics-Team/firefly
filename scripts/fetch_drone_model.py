@@ -2,7 +2,7 @@
 """下载并归一化微无人机模型。
 
 产出 `models/drone/drone.glb`：居中、按水平尺寸缩放；保持 glTF Y-up、机头 +Z
-（`apps/quad` 挂载时转到世界 Z-up、机头 +X）。模型不入 git（`models/` 已 ignore），
+（`apps/firefly/quad` 挂载时转到世界 Z-up、机头 +X）。模型不入 git（`models/` 已 ignore），
 本脚本即复现依据。
 
 用法：uv run python scripts/fetch_drone_model.py

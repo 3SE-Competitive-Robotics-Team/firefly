@@ -1,4 +1,4 @@
-# firefly-camera 配置；缺键回落代码默认值（apps/camera/src/capture.rs）。
+# firefly-camera 配置；缺键回落代码默认值（apps/firefly/camera/src/capture.rs）。
 # 设备节点随内核与接线变化，上板先核对：v4l2-ctl --list-devices。
 # 双目与下视均通过 V4L2 节点采集；OV2640 的 DVP 接口需要适配的采集桥。
 
