@@ -1,9 +1,11 @@
 mod archive;
+mod board_logs;
 mod container;
 mod deploy;
 mod deploy_hil;
 mod mission;
 mod release;
+mod session_logs;
 mod target;
 
 use std::path::PathBuf;
@@ -37,6 +39,10 @@ enum Command {
     Hil(Mission),
     /// 列出工作区的飞行进程
     Processes { workspace: PathBuf },
+    /// 用 Rerun 打开运行目录或 RRD 文件
+    View { recording: PathBuf },
+    /// 将 Python 启动器的进程输出写入工作区日志目录
+    ArchiveSession { workspace: PathBuf },
     /// 解压部署包
     Unpack {
         package: PathBuf,
@@ -72,6 +78,10 @@ fn main() -> ExitCode {
 
 fn run(command: Command) -> Result<(), String> {
     match command {
+        Command::View { recording } => session_logs::view(&recording).map_err(|e| e.to_string()),
+        Command::ArchiveSession { workspace } => {
+            session_logs::serve(&workspace).map_err(|e| e.to_string())
+        }
         Command::Processes { workspace } => {
             let ids = xtask::processes::active(&workspace).map_err(|e| e.to_string())?;
             println!("{}", serde_json::json!(ids));
@@ -97,6 +107,21 @@ fn run(command: Command) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+
+    #[test]
+    fn archive_commands_require_one_path() {
+        for name in ["view", "archive-session"] {
+            let args = [name, "path with spaces"].map(OsStr::new);
+            let path = match Arguments::parse_from(&args).unwrap().command {
+                Command::View { recording } if name == "view" => recording,
+                Command::ArchiveSession { workspace } if name == "archive-session" => workspace,
+                _ => panic!("unexpected command for {name}"),
+            };
+            assert_eq!(path, PathBuf::from(args[1]));
+            assert!(Arguments::parse_from(&args[..1]).is_err());
+            assert!(Arguments::parse_from(&[args[0], args[1], args[1]]).is_err());
+        }
+    }
 
     #[test]
     fn mission_cli_preserves_plan_order_and_requires_at_least_one_plan() {

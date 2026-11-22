@@ -74,6 +74,9 @@ def test_owner_silence_releases_inference_and_can_wake_again():
             if landing is not None:
                 assert landing.stop() == 0
             assert recorder.stop() == 0
+        from firefly_workspace.recording import recording_files
         from rerun.chunk import RrdReader
-        reader = RrdReader(recording)
-        assert reader.store(store=reader.recordings()[0]).schema() is not None
+        with recording_files(recording) as files:
+            for file in files:
+                reader = RrdReader(file)
+                assert reader.store(store=reader.recordings()[0]).schema() is not None

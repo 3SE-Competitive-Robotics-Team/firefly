@@ -1,6 +1,6 @@
 ---
 name: rerun
-description: Rerun 基础认知与 .rrd 录制文件的阅读方法。当需要检查/分析/提取 .rrd 或 .rbl 文件内容、理解 Rerun 数据模型、或用 CLI/Python 从录制文件取数据时使用。本仓库强制：debug 数据必须进 rrd（TextLog/组件），禁止 firefly-vio.log 之类文本日志。
+description: Rerun 基础认知与 .rrd 录制文件的阅读方法。当需要检查/分析/提取 .rrd 或 .rbl 文件内容、理解 Rerun 数据模型、或用 CLI/Python 从录制文件取数据时使用。结构化调试数据进入 RRD，启动器在同一运行目录归档进程输出和系统事件。
 ---
 
 # Rerun 基础与 .rrd 阅读
@@ -37,8 +37,7 @@ description: Rerun 基础认知与 .rrd 录制文件的阅读方法。当需要�
 
 ## 5. 仓库规范（强制）
 
-**本仓库所有 debug 必须使用 rerun rrd 进行**——数据进 viewer 看、用 `RrdReader`/CLI 查、按需导出。
-`firefly-vio.log` / `firefly-sim.log` 这类文本日志是**不允许**的（结构化、可检索、可回放的数据一律进 rrd）。
+结构化调试数据和进程事件使用 RRD。启动器另行捕获 stdout、stderr 与系统事件，供启动和异常退出排查。目录与预算遵循[运行归档规则](../../../docs/mimir.md)。
 
 ## 6. 读 .rrd 的路径
 
@@ -53,8 +52,8 @@ description: Rerun 基础认知与 .rrd 录制文件的阅读方法。当需要�
 记录进程从 sim 的 `Firefly/GroundTruth` 写 `gt/pose` + `gt/traj`（蓝），从 VIO 位姿诊断写 `vio/odom` + `vio/traj`（橙），统一 `sim_time`。
 
 1. 录制：按[运行说明](../../../docs/development.md#运行)启动仿真，按 [Mimir 规则](../../../docs/mimir.md) 找到本次录制。
-2. 看：`rerun 'logs/<yyyymmdd_hhmmss>/log.rrd'`；数值快查 `rerun rrd print --entity gt/pose --entity vio/odom -vvv`。
-3. 读出原始数据：`uv run python .agents/skills/rerun/scripts/read_poses.py 'logs/<yyyymmdd_hhmmss>/log.rrd'`
+2. 看：`cargo xtask view "$run"`；单段数值快查 `uv run rerun rrd print --entity gt/pose --entity vio/odom -vvv "$run/rrd/000001.rrd"`。
+3. 读出原始数据：`uv run python .agents/skills/rerun/scripts/read_poses.py "$run"`，其中 `run` 为 Mimir 输出的运行目录。
    （rerun-sdk 是根项目 dev 依赖，`uv add --dev rerun-sdk` 后 uv run 直接可用，
    勿用 `--with`（每次重建临时环境）或系统 python。默认读 `gt/pose` +
    `vio/odom`，可追加自定义实体；输出逐行 `sim_time_ns x y z qx qy qz qw`，

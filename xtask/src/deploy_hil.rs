@@ -72,7 +72,7 @@ fn wait_for_enumeration() -> Result<(), String> {
         thread::sleep(Duration::from_millis(500));
     }
     Err(format!(
-        "HIL 设备未在 {}s 内枚举；看门狗会在 60s 无数据后恢复 adb，届时查看 /opt/firefly/logs/hil/up.log",
+        "HIL 设备未在 {}s 内枚举；看门狗会在 60s 无数据后恢复 adb，届时用 journalctl -b -t firefly-hil-gadget 查看切换日志",
         ENUMERATION_TIMEOUT.as_secs()
     ))
 }

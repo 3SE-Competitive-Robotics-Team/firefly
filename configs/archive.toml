@@ -1,0 +1,7 @@
+# Bytes. All writers on the same filesystem share this budget.
+max_bytes = 8589934592
+cleanup_bytes = 7516192768
+keep_free_bytes = 2147483648
+rrd_segment_bytes = 268435456
+stream_segment_bytes = 16777216
+stream_segments = 4

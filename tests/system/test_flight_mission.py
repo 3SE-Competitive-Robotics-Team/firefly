@@ -48,10 +48,12 @@ def test_roundtrip_reacquires_pad_and_physically_lands(route, points):
         assert [v["arrival"] for v in visits] == ["pass"] * 4 + ["stop"]
         assert visits[0]["pass_speed_mps"] > 0.25
         assert visits[-1]["hover_seconds"] >= .95
-    assert Path(report["recording"]).is_file()
+    from firefly_workspace.recording import recording_files
     from rerun.chunk import RrdReader
-    reader = RrdReader(report["recording"])
-    [blueprint] = reader.blueprints()
-    assert any("ViewBlueprint:space_origin" in (batch := chunk.to_record_batch()).schema.names
-               and ["/cameras/down"] in batch.column("ViewBlueprint:space_origin").to_pylist()
-               for chunk in reader.stream(store=blueprint)), "embedded blueprint must expose the recorded down camera"
+    with recording_files(report["recording"]) as files:
+        for file in files:
+            reader = RrdReader(file)
+            [blueprint] = reader.blueprints()
+            assert any("ViewBlueprint:space_origin" in (batch := chunk.to_record_batch()).schema.names
+                       and ["/cameras/down"] in batch.column("ViewBlueprint:space_origin").to_pylist()
+                       for chunk in reader.stream(store=blueprint)), "embedded blueprint must expose the down camera"

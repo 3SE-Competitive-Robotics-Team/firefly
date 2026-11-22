@@ -135,7 +135,7 @@ def render_masks(manifest):
 
 def collect(args):
     from PIL import Image,ImageDraw
-    from rerun.chunk import RrdReader
+    from firefly_workspace.recording import recording_chunks, recording_files
     output=args.output.resolve();output.mkdir(parents=True,exist_ok=False)
     entries={}
     sources=sorted(args.images.rglob("*.png"))
@@ -148,7 +148,7 @@ def collect(args):
     recordings=[]
     for path in sorted(args.recordings):
         poses={};matches=[];active=False;next_sample=0.;samples=0
-        for chunk in RrdReader(path).stream():
+        for chunk in recording_chunks(path):
             batch=chunk.to_record_batch()
             if "sim_time" not in batch.schema.names:continue
             stamps=batch.column("sim_time").cast("int64").to_pylist()
@@ -171,12 +171,15 @@ def collect(args):
                     if key in entries or sample:
                         entries.setdefault(key,{"pixels":pixels,"screenshots":[],"sources":[]})
                         matches.append((key,stamp))
-        group=path.parent.name if active else "fixed_poses"
+        group=(path.name if path.is_dir() else path.parent.name) if active else "fixed_poses"
         for key,stamp in matches:
             pose,interpolated=pose_at(poses,stamp)
             if pose is not None:entries[key]["sources"].append({"recording":str(path.resolve()),"timestamp_ns":stamp,
                 "group":group,"body_pose":pose,"pose_interpolated":interpolated})
-        recordings.append({"path":str(path.resolve()),"sha256":digest(path),"group":group})
+        with recording_files(path) as files:
+            checksum = ({"segments": [{"name": f.name, "sha256": digest(f)} for f in files]}
+                        if path.is_dir() else {"sha256": digest(path)})
+        recordings.append({"path":str(path.resolve()),**checksum,"group":group})
     groups=sorted({source["group"] for row in entries.values() for source in row["sources"]})
     if len(groups)<3:raise ValueError("Need three independent recording groups for train/val/test")
     group_split={group:("train" if index<len(groups)-2 else "val" if index==len(groups)-2 else "test") for index,group in enumerate(groups)}

@@ -1,3 +1,4 @@
+use firefly_archive::{Run, output::Output};
 use firefly_mission::{Phase, Plan, Request, call_at};
 use nix::{
     sys::signal::{Signal, kill},
@@ -5,6 +6,7 @@ use nix::{
 };
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeSet,
     fs,
     io::{self, BufRead, BufReader},
     path::{Path, PathBuf},
@@ -21,12 +23,57 @@ use std::{
 struct Stack {
     children: Vec<Child>,
     stopped: Arc<AtomicBool>,
+    run: Run,
+    output: Vec<Output>,
+    start: SystemTime,
+    pids: BTreeSet<u32>,
 }
 
 impl Stack {
-    fn launch(&mut self, mut cmd: Command) -> io::Result<&mut Child> {
-        self.children.push(cmd.spawn()?);
-        Ok(self.children.last_mut().expect("just pushed"))
+    fn new(root: &Path, source: &str) -> io::Result<Self> {
+        let run = Run::create_at(root, source)?;
+        eprintln!("archive: {}", run.path().display());
+        Ok(Self {
+            children: Vec::new(),
+            stopped: Arc::default(),
+            run,
+            output: Vec::new(),
+            start: SystemTime::now(),
+            pids: BTreeSet::new(),
+        })
+    }
+    fn spawn(&mut self, mut cmd: Command, ready: Option<mpsc::Sender<PathBuf>>) -> io::Result<()> {
+        let source = Path::new(cmd.get_program())
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| io::Error::other("missing child process name"))?;
+        let output = Output::new(self.run.clone(), source)?;
+        let mut child = cmd
+            .env("FIREFLY_RUN_DIR", self.run.path())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        self.pids.insert(child.id());
+        if let Some(ready) = ready {
+            let pid = child.id();
+            let stdout = child.stdout.take().expect("piped recorder stdout");
+            let tee = output.clone();
+            thread::spawn(move || {
+                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    tee.line(pid, "stdout", line.as_bytes());
+                    if let Some(path) = line.strip_prefix("recording: ") {
+                        let _ = ready.send(PathBuf::from(path));
+                    }
+                }
+            });
+        }
+        output.attach(&mut child);
+        self.children.push(child);
+        self.output.push(output);
+        Ok(())
+    }
+    fn launch(&mut self, cmd: Command) -> io::Result<()> {
+        self.spawn(cmd, None)
     }
     fn healthy(&mut self) -> io::Result<()> {
         if self.stopped.load(Ordering::Relaxed) {
@@ -59,6 +106,27 @@ impl Stack {
             thread::sleep(Duration::from_millis(200));
         }
     }
+    fn board_snapshot(
+        &mut self,
+        socket: &Path,
+    ) -> io::Result<Option<firefly_archive::transfer::Snapshot>> {
+        let mut start = None;
+        let mut reason = String::new();
+        let ready = self.wait(Duration::from_secs(15), || {
+            match super::board_logs::snapshot(socket) {
+                Ok(snapshot) => start = Some(snapshot),
+                Err(error) => reason = error.to_string(),
+            }
+            Ok(start.is_some())
+        });
+        if let Err(error) = ready {
+            self.run.gap(
+                "board",
+                &format!("HIL start cursor unavailable: {reason} ({error})"),
+            )?;
+        }
+        Ok(start)
+    }
     fn shutdown(&mut self) -> Vec<String> {
         let mut errors = Vec::new();
         while let Some(mut child) = self.children.pop() {
@@ -85,6 +153,18 @@ impl Stack {
                 }
             }
         }
+        for output in self.output.drain(..) {
+            if let Err(error) = output.finish() {
+                errors.push(error.to_string());
+            }
+        }
+        let pids = std::mem::take(&mut self.pids);
+        if let Err(error) = firefly_archive::host::system(&self.run, self.start, &pids) {
+            eprintln!("host system log: {error}");
+            if let Err(error) = self.run.gap("system-host", &error.to_string()) {
+                errors.push(error.to_string());
+            }
+        }
         errors
     }
 }
@@ -95,23 +175,13 @@ impl Drop for Stack {
 }
 
 fn record(stack: &mut Stack, release: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let mut recorder = program(release.join("mimir"), &[]);
-    recorder.stdout(Stdio::piped());
-    let out = stack
-        .launch(recorder)?
-        .stdout
-        .take()
-        .ok_or("missing recorder pipe")?;
     let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        for line in BufReader::new(out).lines().map_while(Result::ok) {
-            if let Some(path) = line.strip_prefix("recording: ") {
-                let _ = tx.send(PathBuf::from(path));
-            }
-            eprintln!("{line}");
-        }
-    });
-    Ok(rx.recv_timeout(Duration::from_secs(15))?)
+    stack.spawn(program(release.join("mimir"), &[]), Some(tx))?;
+    let path = rx.recv_timeout(Duration::from_secs(15))?;
+    if path != stack.run.path() {
+        return Err("Mimir opened a different run archive".into());
+    }
+    Ok(path)
 }
 
 fn launch_stack(
@@ -258,6 +328,7 @@ pub fn run(hil: bool, paths: &[PathBuf], seed: u64) -> Result<(), Box<dyn std::e
         return Err("missing firefly-verify; build the host tools with cargo xtask release".into());
     }
     let _lock = claim_environment(&root)?;
+    let mut stack = Stack::new(&root, if hil { "hil" } else { "sil" })?;
     let python = root.join(".venv/bin/python");
     if hil
         && !program(release.join("hil"), &["--check"])
@@ -274,14 +345,9 @@ pub fn run(hil: bool, paths: &[PathBuf], seed: u64) -> Result<(), Box<dyn std::e
     } else {
         install_daemon(&root, prefix.path())?
     };
-    let stopped = Arc::new(AtomicBool::new(false));
     for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
-        signal_hook::flag::register(signal, stopped.clone())?;
+        signal_hook::flag::register(signal, stack.stopped.clone())?;
     }
-    let mut stack = Stack {
-        children: Vec::new(),
-        stopped,
-    };
     let path = record(&mut stack, &release)?;
     launch_stack(
         &mut stack,
@@ -292,9 +358,21 @@ pub fn run(hil: bool, paths: &[PathBuf], seed: u64) -> Result<(), Box<dyn std::e
         &plans,
         seed,
     )?;
+    let board_start = if hil {
+        stack.board_snapshot(&socket)?
+    } else {
+        None
+    };
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let mut expected = Vec::new();
     let mission = fly(&mut stack, &socket, plans, nonce, &mut expected);
+    if let Some(start) = board_start
+        && let Err(error) = super::board_logs::collect(&stack.run, &socket, &start)
+    {
+        stack
+            .run
+            .gap("board", &format!("HIL log download interrupted: {error}"))?;
+    }
     let cleanup = stack.shutdown();
     let score = Command::new(verifier)
         .arg(&path)
@@ -336,10 +414,7 @@ mod tests {
             .unwrap();
         let socket = install_daemon(&root, prefix.path()).unwrap();
         let binary = prefix.path().join("bin/firefly-daemon");
-        let mut stack = Stack {
-            children: Vec::new(),
-            stopped: Arc::default(),
-        };
+        let mut stack = Stack::new(&root, "sil-test").unwrap();
         let path = record(&mut stack, &release).unwrap();
         let status = || call_at(&socket, &Request::Status { id: None });
         stack.launch(program(&binary, &[])).unwrap();

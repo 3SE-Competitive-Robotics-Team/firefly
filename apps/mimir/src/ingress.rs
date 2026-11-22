@@ -371,8 +371,8 @@ fn receive(options: &Options, sender: &Sender, stop: &AtomicBool) -> Result<()> 
 /// Run the recorder until stopped, then drain the owned queue and close the RRD.
 /// # Errors
 /// Reports IPC, data-contract, queue-budget, writer-thread and disk failures after cleanup.
-pub fn run(options: &Options, stop: &Arc<AtomicBool>) -> Result<()> {
-    let mut archive = Archive::create(options.clone())?;
+pub fn run(options: &Options, stop: &Arc<AtomicBool>, run: firefly_archive::Run) -> Result<()> {
+    let mut archive = Archive::in_run(options.clone(), run)?;
     archive.log("mimir", -1., wall_time_ns(), "recording started", "INFO")?;
     let (tx, rx) = mpsc::sync_channel(options.queue_messages);
     let bytes = Arc::new(AtomicUsize::new(0));

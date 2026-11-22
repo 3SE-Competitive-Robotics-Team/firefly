@@ -1,6 +1,6 @@
 //! 进程清单只在启动时读取；`enable`/`disable` 的改动由下一次 supervisor 启动生效。
 
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -10,8 +10,10 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
+use firefly_archive::Run;
+use firefly_archive::output::Output;
 use nix::errno::Errno;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
@@ -20,9 +22,9 @@ use signal_hook::flag;
 
 use crate::process::SOCKET;
 use crate::process::config::{Config, Process};
+use crate::process::journal::Journal;
 use crate::process::protocol::{ProcessState, ProcessStatus, Request, Response};
 
-const LOG_DIR: &str = "logs/process";
 const START_DELAY: Duration = Duration::from_millis(300);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const RESTART_BASE: Duration = Duration::from_secs(1);
@@ -34,6 +36,7 @@ const MAX_REQUEST: usize = 64 * 1024;
 
 struct Managed {
     process: Process,
+    output: Option<Output>,
     lifecycle: Lifecycle,
     restarts: u32,
 }
@@ -82,8 +85,26 @@ impl Lifecycle {
     }
 }
 
-#[allow(clippy::too_many_lines)]
 pub(crate) fn run(path: &Path) -> Result<(), String> {
+    let archive = Run::board()
+        .map_err(|error| eprintln!("ffctl: boot archive: {error}"))
+        .ok();
+    let result = supervise(path, archive.as_ref());
+    if let Err(reason) = &result
+        && let Some(run) = archive
+    {
+        let logged = Output::new(run, "ffctl").and_then(|output| {
+            output.line(std::process::id(), "stderr", reason.as_bytes());
+            output.finish()
+        });
+        if let Err(error) = logged {
+            eprintln!("ffctl: archive supervisor failure: {error}");
+        }
+    }
+    result
+}
+
+fn supervise(path: &Path, archive: Option<&Run>) -> Result<(), String> {
     let config = Config::load(path)?;
     let shutdown = Arc::new(AtomicBool::new(false));
     for signal in [SIGTERM, SIGINT] {
@@ -92,6 +113,9 @@ pub(crate) fn run(path: &Path) -> Result<(), String> {
     }
 
     let listener = bind_socket()?;
+    let journal = Journal::start(archive.cloned())
+        .map_err(|error| eprintln!("ffctl: journal worker: {error}"))
+        .ok();
     let (sender, receiver) = mpsc::channel::<(Request, mpsc::SyncSender<Response>)>();
     spawn_server(listener, sender, Arc::clone(&shutdown));
 
@@ -99,6 +123,13 @@ pub(crate) fn run(path: &Path) -> Result<(), String> {
         .processes
         .into_iter()
         .map(|process| Managed {
+            output: archive
+                .map_or_else(
+                    || Output::board(&process.name),
+                    |run| Output::new(run.clone(), &process.name),
+                )
+                .map_err(|error| eprintln!("ffctl: text archive {}: {error}", process.name))
+                .ok(),
             process,
             lifecycle: Lifecycle::Stopped,
             restarts: 0,
@@ -119,6 +150,17 @@ pub(crate) fn run(path: &Path) -> Result<(), String> {
 
     let stopped = stop(&mut managed, &[]);
     let _ = fs::remove_file(SOCKET);
+    for entry in managed {
+        if entry.lifecycle.child().is_none()
+            && let Some(output) = entry.output
+            && let Err(error) = output.finish()
+        {
+            eprintln!("ffctl: {} text archive: {error}", entry.process.name);
+        }
+    }
+    if let Some(journal) = journal {
+        journal.finish();
+    }
     stopped.map(|_| ())
 }
 
@@ -129,7 +171,7 @@ fn bring_up(managed: &mut [Managed]) -> Option<String> {
             continue;
         }
         let name = entry.process.name.clone();
-        match spawn(&entry.process) {
+        match spawn(entry) {
             Ok(child) => {
                 entry.lifecycle = Lifecycle::Running {
                     child,
@@ -197,7 +239,7 @@ fn monitor(managed: &mut [Managed]) {
         }
 
         if matches!(entry.lifecycle, Lifecycle::Backoff { restart_at } if now >= restart_at) {
-            match spawn(&entry.process) {
+            match spawn(entry) {
                 Ok(child) => {
                     entry.lifecycle = Lifecycle::Running {
                         child,
@@ -250,7 +292,7 @@ fn start(managed: &mut [Managed], names: &[String]) -> Result<String, String> {
         if managed[index].lifecycle.child().is_some() {
             continue;
         }
-        match spawn(&managed[index].process) {
+        match spawn(&managed[index]) {
             Ok(child) => {
                 managed[index].lifecycle = Lifecycle::Running {
                     child,
@@ -396,45 +438,32 @@ fn statuses(managed: &[Managed]) -> Vec<ProcessStatus> {
         .collect()
 }
 
-fn spawn(process: &Process) -> Result<Child, String> {
+fn spawn(entry: &Managed) -> Result<Child, String> {
+    let process = &entry.process;
     let program = process
         .command
         .first()
         .ok_or_else(|| "command 为空".to_owned())?;
-    fs::create_dir_all(LOG_DIR).map_err(|error| format!("创建 {LOG_DIR}: {error}"))?;
-    let log_path = Path::new(LOG_DIR).join(format!("{}.log", process.name));
-    let mut log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .map_err(|error| format!("打开 {}: {error}", log_path.display()))?;
-    writeln!(log, "=== {} 启动 {} ===", unix_seconds(), process.name)
-        .map_err(|error| format!("写 {}: {error}", log_path.display()))?;
-    log.sync_all()
-        .map_err(|error| format!("fsync {}: {error}", log_path.display()))?;
-
-    Command::new(program)
+    let mut command = Command::new(program);
+    if entry.output.is_some() {
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    }
+    let mut child = command
         .args(&process.command[1..])
         .stdin(Stdio::null())
-        .stdout(Stdio::from(
-            log.try_clone()
-                .map_err(|error| format!("复制日志句柄: {error}"))?,
-        ))
-        .stderr(Stdio::from(log))
         .process_group(0)
         .spawn()
-        .map_err(|error| format!("启动 {}: {error}", process.name))
+        .map_err(|error| format!("启动 {}: {error}", process.name))?;
+    if let Some(output) = &entry.output {
+        output.line(child.id(), "supervisor", b"started");
+        output.attach(&mut child);
+    }
+    Ok(child)
 }
 
 fn backoff(attempt: u32) -> Duration {
     let shift = attempt.saturating_sub(1).min(5);
     (RESTART_BASE * (1_u32 << shift)).min(RESTART_MAX)
-}
-
-fn unix_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs())
 }
 
 fn bind_socket() -> Result<UnixListener, String> {
@@ -579,6 +608,7 @@ mod tests {
 
     fn pending_restart(name: &str) -> Managed {
         Managed {
+            output: None,
             process: Process {
                 name: name.to_owned(),
                 command: vec!["pending-restart-fixture".to_owned()],
@@ -701,11 +731,18 @@ mod tests {
     #[test]
     fn start_and_retry_reap_children_and_preserve_restart_policy() {
         let name = format!("ffctl-lifecycle-test-{}", std::process::id());
-        let log_path = Path::new(LOG_DIR).join(format!("{name}.log"));
-        assert!(!log_path.exists());
+        let root = firefly_config::paths::root()
+            .join("target/ffctl-tests")
+            .join(&name);
+        let run = Run::create_at(&root, "test").unwrap();
         let mut fixture = Fixture(pending_restart(&name));
+        fixture.0.output = Some(Output::new(run.clone(), &name).unwrap());
         fixture.0.lifecycle = Lifecycle::Stopped;
-        fixture.0.process.command = vec!["/bin/sh".into(), "-c".into(), "exit 0".into()];
+        fixture.0.process.command = vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "echo hello; echo warning >&2".into(),
+        ];
 
         start(std::slice::from_mut(&mut fixture.0), &[]).unwrap();
         assert_eq!(fixture.0.restarts, 0);
@@ -734,7 +771,16 @@ mod tests {
 
         assert!(bring_up(std::slice::from_mut(&mut fixture.0)).is_some());
         assert!(matches!(fixture.0.lifecycle, Lifecycle::Stopped));
-        fs::remove_file(log_path).unwrap();
+        fixture.0.output.take().unwrap().finish().unwrap();
+        let logs: String = fs::read_dir(run.path().join("text"))
+            .unwrap()
+            .map(|e| fs::read_to_string(e.unwrap().path()).unwrap())
+            .collect();
+        assert!(logs.contains(&format!("{pid} stdout hello\n")));
+        assert!(logs.contains(&format!("{pid} stderr warning\n")));
+        assert_eq!(logs.matches(" supervisor started\n").count(), 4);
+        drop(run);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

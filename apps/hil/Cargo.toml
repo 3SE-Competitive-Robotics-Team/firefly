@@ -12,6 +12,7 @@ readme.workspace = true
 
 [dependencies]
 usage-rs.workspace = true
+firefly-archive.workspace = true
 firefly-config = { workspace = true }
 firefly-error = { workspace = true }
 firefly-hil = { workspace = true }

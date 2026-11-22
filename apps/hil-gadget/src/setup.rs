@@ -1,5 +1,6 @@
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Read;
+use std::os::unix::net::UnixDatagram;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -10,7 +11,7 @@ use firefly_hil::gadget::{HIL, write_descriptors};
 const GADGET: &str = "/sys/kernel/config/usb_gadget/g1";
 const FFS_ROOT: &str = "/dev/usb-ffs";
 const STATE_DIR: &str = "/opt/firefly/logs/hil";
-const UP_LOG: &str = "/opt/firefly/logs/hil/up.log";
+const JOURNAL_TAG: &str = "firefly-hil-gadget";
 const READY: &str = "/opt/firefly/logs/hil/descriptors_ready";
 const UP_MARKER: &str = "/opt/firefly/logs/hil/up";
 /// adb 恢复成功标记（看门狗据此避免重复重建）。
@@ -41,7 +42,6 @@ const FUNCTIONS: [&str; 2] = [ADB, HIL.name];
 
 pub fn up() -> Result<(), String> {
     let _transition = crate::transition::lock(Path::new(STATE_DIR))?;
-    reset_log();
     note("开始：停止 firefly 与 adbd，整块重建 gadget");
     if let Err(error) = up_inner() {
         note(&format!("up 失败：{error}"));
@@ -91,7 +91,6 @@ pub fn serve() -> Result<(), String> {
 
 pub fn diag() -> Result<(), String> {
     let _transition = crate::transition::lock(Path::new(STATE_DIR))?;
-    reset_log();
     note("diag：单个 hil 功能");
     stop_firefly();
     stop_adb_rebind_loop();
@@ -775,28 +774,48 @@ fn remove_file(path: impl AsRef<Path>) -> Result<(), String> {
     }
 }
 
-/// 追加一行进度并 `fsync`：TF 卡 `commit=600`，断电会丢未落盘写入。
+/// Record transition progress while the Firefly supervisor and its collector restart.
 pub(crate) fn note(message: &str) {
-    if let Ok(mut file) = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(UP_LOG)
+    // The native journal length form preserves multiline command errors as a single entry.
+    let mut entry = format!("SYSLOG_IDENTIFIER={JOURNAL_TAG}\nPRIORITY=6\nMESSAGE\n").into_bytes();
+    entry.extend_from_slice(&(message.len() as u64).to_le_bytes());
+    entry.extend_from_slice(message.as_bytes());
+    entry.push(b'\n');
+    if let Err(error) = UnixDatagram::unbound()
+        .and_then(|socket| socket.send_to(&entry, "/run/systemd/journal/socket"))
     {
-        let _ = writeln!(file, "[{:.3}] {message}", now_seconds());
-        let _ = file.sync_all();
+        eprintln!("{JOURNAL_TAG}: {message} (journal: {error})");
+    } else if !Command::new("journalctl")
+        .arg("--sync")
+        .status()
+        .is_ok_and(|status| status.success())
+    {
+        eprintln!("{JOURNAL_TAG}: could not sync journal");
     }
 }
 
-fn reset_log() {
-    let _ = fs::write(
-        UP_LOG,
-        format!("[{:.3}] hil-gadget up 启动\n", now_seconds()),
-    );
-    sync_disk();
-}
-
 fn read_log() -> String {
-    fs::read_to_string(UP_LOG).unwrap_or_default()
+    Command::new("journalctl")
+        .args([
+            "--boot",
+            "--no-pager",
+            "--output=cat",
+            "--lines=6",
+            "--identifier",
+            JOURNAL_TAG,
+        ])
+        .output()
+        .map_or_else(
+            |error| error.to_string(),
+            |output| {
+                let bytes = if output.status.success() {
+                    &output.stdout
+                } else {
+                    &output.stderr
+                };
+                String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(4096)..]).into_owned()
+            },
+        )
 }
 
 fn kernel_gadget_log() -> String {

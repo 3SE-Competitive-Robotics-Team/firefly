@@ -1,6 +1,8 @@
 """使用本地子进程验证所有权、退出回收和运行互斥。"""
 
 import os
+import json
+from pathlib import Path
 import signal
 import subprocess
 import sys
@@ -54,6 +56,25 @@ def test_exclusive_run_releases_lock_on_failure(tmp_path):
             raise ValueError("failed run")
     with isolated_run(tmp_path):
         pass
+
+
+def test_managed_run_captures_both_streams_and_preserves_child_identity(tmp_path):
+    with isolated_run(tmp_path):
+        command = [sys.executable, "-c", (
+            "import os, sys\n"
+            "print('recording: ' + os.environ['FIREFLY_RUN_DIR'])\n"
+            "print('diagnostic', file=sys.stderr)\n"
+        )]
+        child = ManagedProcess(command, cwd=tmp_path, env=dict(os.environ))
+        run = child.wait_recording()
+        assert child.process.wait(timeout=10) == 0
+        assert child.stop() == 0
+    assert run.parent == tmp_path.resolve() / "logs/runs"
+    assert json.loads((run / "manifest.json").read_text())["state"] == "closed"
+    [text] = (run / "text").glob(f"{Path(sys.executable).name}.*.log")
+    records = text.read_text().splitlines()
+    assert any(f" {child.pid} stdout recording: {run}" in row for row in records)
+    assert any(f" {child.pid} stderr diagnostic" in row for row in records)
 
 
 def test_shutdown_timeout_does_not_report_success():

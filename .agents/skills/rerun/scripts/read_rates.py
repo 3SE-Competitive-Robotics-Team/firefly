@@ -10,14 +10,14 @@ import sys
 
 import numpy as np
 import pyarrow as pa
-from rerun.chunk import RrdReader
+from firefly_workspace.recording import recording_chunks
 
 DEFAULT_ENTITIES = ("gt/pose", "vio/odom")
 
 
-def rates(reader, store, entity):
+def rates(path, entity):
     ts = []
-    for chunk in reader.stream(store=store):
+    for chunk in recording_chunks(path, content=f"/{entity}", complete=False):
         if chunk.entity_path.lstrip("/") != entity:
             continue
         tb = chunk.to_record_batch()
@@ -31,10 +31,8 @@ def main() -> None:
     if len(sys.argv) < 2:
         print(__doc__)
         sys.exit(1)
-    reader = RrdReader(sys.argv[1])
-    store = reader.recordings()[0]
     for entity in sys.argv[2:] or list(DEFAULT_ENTITIES):
-        ts = rates(reader, store, entity)
+        ts = rates(sys.argv[1], entity)
         if ts.size < 2:
             print(f"== {entity}: 数据不足（{ts.size} 点）")
             continue
