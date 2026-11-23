@@ -3623,7 +3623,6 @@ dependencies = [
  "iceoryx2",
  "log",
  "proptest",
- "serde",
 ]
 
 [[package]]
@@ -8541,7 +8540,6 @@ dependencies = [
  "firefly-render",
  "log",
  "nalgebra",
- "rand 0.10.4",
  "serde",
  "toml 1.2.2+spec-1.1.0",
  "usage-rs",

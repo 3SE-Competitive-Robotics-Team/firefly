@@ -17,6 +17,8 @@ path = "src/main.rs"
 [dependencies]
 firefly-error.workspace = true
 usage-rs.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
 firefly-hil.workspace = true
 
 [lints]

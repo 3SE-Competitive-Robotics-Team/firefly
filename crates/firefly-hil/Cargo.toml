@@ -12,7 +12,6 @@ readme.workspace = true
 
 [dependencies]
 firefly-pubsub = { workspace = true }
-serde = { workspace = true }
 log.workspace = true
 
 [dev-dependencies]
