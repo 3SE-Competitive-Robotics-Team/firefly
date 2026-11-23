@@ -36,7 +36,9 @@ use re_sdk_types::archetypes as rr;
 use crate::{
     archive::{Archive, wall_time_ns},
     config::Options,
-    invalid, schema,
+    invalid,
+    observation::{Geometry, VoxelChunk},
+    schema,
 };
 
 enum Event {
@@ -44,8 +46,8 @@ enum Event {
     Prediction(VioPrediction),
     Rig(Box<CameraRig>),
     Scalar(ScalarMessage),
-    Geometry(Box<VizMessage>),
-    Voxel(Box<VoxelMessage>),
+    Geometry(Geometry),
+    Voxel(VoxelChunk),
     Log(Box<LogMessage>),
     Odom(&'static str, OdomMessage),
     Navigation(Box<NavigationMessage>),
@@ -63,8 +65,8 @@ impl Event {
     fn bytes(&self) -> usize {
         size_of::<Self>()
             + match self {
-                Self::Geometry(_) => size_of::<VizMessage>(),
-                Self::Voxel(_) => size_of::<VoxelMessage>(),
+                Self::Geometry(msg) => msg.heap_bytes(),
+                Self::Voxel(msg) => msg.heap_bytes(),
                 Self::Log(_) => size_of::<LogMessage>(),
                 Self::Rig(_) => size_of::<CameraRig>(),
                 Self::Image { pixels, .. } => pixels.capacity(),
@@ -332,7 +334,7 @@ fn receive(options: &Options, sender: &Sender, stop: &AtomicBool) -> Result<()> 
                 sample.sequence,
                 options.max_publishers,
             )?;
-            sender.send(Event::Geometry(Box::new(*sample)))?;
+            sender.send(Event::Geometry(Geometry::from_message(&sample)?))?;
         }
         for _ in 0..VOXEL_BUFFER_SIZE {
             let Some(sample) = voxels.receive()? else {
@@ -344,7 +346,7 @@ fn receive(options: &Options, sender: &Sender, stop: &AtomicBool) -> Result<()> 
                 sample.sequence,
                 options.max_publishers,
             )?;
-            sender.send(Event::Voxel(Box::new(*sample)))?;
+            sender.send(Event::Voxel(VoxelChunk::from_message(&sample)?))?;
         }
         for _ in 0..LOG_BUFFER_SIZE {
             let Some(sample) = logs.receive()? else {

@@ -89,18 +89,15 @@ impl<T: PyramidPixel> ManagedImagePyr<T> {
     /// Has the same dimension requirements as [`Self::new`].
     pub fn set_from_image(&mut self, source: &ManagedImage<T>, num_levels: usize) {
         self.orig_w = source.w;
-        self.image.reinitialise(
-            source
-                .w
-                .checked_add(source.w / 2)
-                .expect("mipmap width overflow"),
-            source.h,
-            source
-                .w
-                .checked_add(source.w / 2)
-                .expect("mipmap width overflow"),
-        );
-        self.image.view_mut().fill(T::default());
+        let width = source
+            .w
+            .checked_add(source.w / 2)
+            .expect("mipmap width overflow");
+        if self.image.w == width && self.image.h == source.h && self.image.stride == width {
+            self.image.view_mut().fill(T::default());
+        } else {
+            self.image = ManagedImage::new(width, source.h);
+        }
         self.image
             .view_mut()
             .sub_image(0, 0, source.w, source.h)

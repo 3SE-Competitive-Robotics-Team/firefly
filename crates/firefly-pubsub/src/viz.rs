@@ -192,6 +192,12 @@ pub struct VoxelMessage {
     pub chunk_count: u32,
 }
 
+impl Default for VoxelMessage {
+    fn default() -> Self {
+        Self::base(0, -1., "")
+    }
+}
+
 impl VoxelMessage {
     #[must_use]
     // 定长 ZeroCopySend 载荷：数组大小由 IPC 布局固定，只能在栈上整体构造。
@@ -280,6 +286,34 @@ impl VizPublisher {
             Some(1),
         )?);
         Ok(publisher)
+    }
+
+    /// Fill a voxel update in its shared slot and assign its publisher sequence.
+    /// # Errors
+    /// Returns an error if the voxel channel is unavailable or publication fails.
+    pub fn publish_voxels(
+        &self,
+        kind: u32,
+        timestamp: f64,
+        entity: &str,
+        fill: impl FnOnce(&mut VoxelMessage),
+    ) -> Result<crate::trace::TraceContext, firefly_error::Error> {
+        let voxels = self.voxels.as_ref().ok_or_else(|| {
+            firefly_error::Error::new(firefly_error::ErrorKind::InvalidArgument, "体素通道未启用")
+        })?;
+        let sequence = self.voxel_sequence.get();
+        self.voxel_sequence.set(sequence.wrapping_add(1));
+        let result = voxels.publish_with(|msg| {
+            (msg.entity, msg.entity_len) = entity_bytes(entity);
+            msg.kind = kind;
+            msg.timestamp = timestamp;
+            fill(msg);
+            msg.sequence = sequence;
+        });
+        if let Err(error) = &result {
+            log::warn!("可视化 IPC 发布失败: {error}");
+        }
+        result
     }
 
     /// 发布失败记入结构化日志；诊断链路不得阻塞算法。

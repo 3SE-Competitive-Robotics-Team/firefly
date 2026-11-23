@@ -339,8 +339,9 @@ and depth. Global map optimization is evaluated through the dataset observations
 
 Mimir prints the absolute run directory on stdout and writes numbered files under `rrd/`. The [Mimir recording contract](mimir.md) defines the layout, storage limits and retention rules for all callers.
 
-Mimir owns IPC subscriptions in one receive thread, copies each loan once into a bounded channel,
-then releases the loan. A single writer groups scalar and typed observation rows by entity into
+Mimir owns IPC subscriptions in one receive thread, copies active fields into owned events for the bounded writer channel,
+then releases each loan. Geometry events carry only the selected shape and voxel events carry the
+indices declared by the chunk. Queue accounting includes each event and its owned buffers. A single writer groups scalar and typed observation rows by entity into
 columnar Rerun chunks. Typed rows use Rerun's `PendingRow::many_into_chunks` to group images, poses,
 trajectories and metric cards.
 Count, byte, entity, publisher and voxel budgets are bounded in

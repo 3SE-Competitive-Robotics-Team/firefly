@@ -1,4 +1,4 @@
-use firefly_pubsub::camera::{IMAGE_HEIGHT, IMAGE_SIZE, IMAGE_WIDTH};
+use firefly_pubsub::camera::{IMAGE_HEIGHT, IMAGE_WIDTH};
 
 pub const SIDE: usize = 320;
 
@@ -27,8 +27,12 @@ impl Rows {
 
 pub struct Pixels {
     gray: Vec<u8>,
-    square: Vec<f32>,
     input_rows: Vec<Rows>,
+    restore: OutputGrid,
+}
+
+pub struct OutputGrid {
+    square: Vec<f32>,
     head_axis: Vec<Rows>,
     output_rows: Vec<Rows>,
 }
@@ -42,7 +46,6 @@ impl Pixels {
         };
         Self {
             gray: vec![0; SIDE * SIDE],
-            square: vec![0.; SIDE * SIDE],
             input_rows: (0..SIDE)
                 .map(|i| {
                     Rows::new(
@@ -51,13 +54,16 @@ impl Pixels {
                     )
                 })
                 .collect(),
-            head_axis: aligned(SIDE / 4, SIDE),
-            output_rows: aligned(SIDE, IMAGE_HEIGHT),
+            restore: OutputGrid {
+                square: vec![0.; SIDE * SIDE],
+                head_axis: aligned(SIDE / 4, SIDE),
+                output_rows: aligned(SIDE, IMAGE_HEIGHT),
+            },
         }
     }
 
     /// Stretch the entire left image with `OpenCV`'s half-pixel input coordinates.
-    pub fn input(&mut self, frame: &[u8]) -> &[u8] {
+    pub fn input(&mut self, frame: &[u8]) -> (&[u8], &mut OutputGrid) {
         for (row, &r) in self
             .gray
             .as_chunks_mut::<SIDE>()
@@ -71,11 +77,17 @@ impl Pixels {
                 *out = r.sample(f32::from(a), f32::from(b)).round() as u8;
             }
         }
-        &self.gray
+        (&self.gray, &mut self.restore)
     }
+}
 
+impl OutputGrid {
     /// Restore the compact NPU head to the ONNX output grid, then to camera pixels.
-    pub fn restore_into(&mut self, side: usize, values: &[f32], output: &mut [f32; IMAGE_SIZE]) {
+    pub fn restore<'a>(
+        &'a mut self,
+        side: usize,
+        values: &'a [f32],
+    ) -> (impl Iterator<Item = f32> + 'a, f32) {
         let full = if side == SIDE {
             values
         } else {
@@ -94,20 +106,17 @@ impl Pixels {
             }
             &self.square
         };
-        for (row, &y) in output
-            .as_chunks_mut::<IMAGE_WIDTH>()
-            .0
-            .iter_mut()
-            .zip(&self.output_rows)
-        {
-            for ((out, &a), &b) in row
-                .iter_mut()
-                .zip(&full[y.a * SIDE..])
-                .zip(&full[y.b * SIDE..])
-            {
-                *out = y.sample(a, b);
-            }
-        }
+        let center = self.output_rows[IMAGE_HEIGHT / 2];
+        let center_depth = center.sample(
+            full[center.a * SIDE + IMAGE_WIDTH / 2],
+            full[center.b * SIDE + IMAGE_WIDTH / 2],
+        );
+        let pixels = self.output_rows.iter().flat_map(move |&y| {
+            let a = &full[y.a * SIDE..][..IMAGE_WIDTH];
+            let b = &full[y.b * SIDE..][..IMAGE_WIDTH];
+            a.iter().zip(b).map(move |(&a, &b)| y.sample(a, b))
+        });
+        (pixels, center_depth)
     }
 }
 
@@ -122,8 +131,13 @@ mod tests {
             let plane: Vec<_> = (0..side * side)
                 .map(|i| 1. + (i / side + i % side) as f32 / (side - 1) as f32)
                 .collect();
-            let mut restored = vec![f32::NAN; IMAGE_SIZE];
-            pixels.restore_into(side, &plane, restored.as_mut_slice().try_into().unwrap());
+            let (pixels, center) = pixels.restore.restore(side, &plane);
+            let restored: Vec<_> = pixels.collect();
+            assert_eq!(restored.len(), IMAGE_WIDTH * IMAGE_HEIGHT);
+            assert_eq!(
+                center,
+                restored[IMAGE_WIDTH * (IMAGE_HEIGHT / 2) + IMAGE_WIDTH / 2]
+            );
             for (i, &v) in restored.iter().enumerate() {
                 let expected = 1.
                     + (i % IMAGE_WIDTH) as f32 / (IMAGE_WIDTH - 1) as f32

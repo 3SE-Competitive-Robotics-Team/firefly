@@ -3,39 +3,8 @@ use firefly_landing::Detection;
 #[cfg(test)]
 use firefly_landing::geometry::refine_corners;
 use firefly_landing::geometry::{Geometry, corner_candidates};
-use firefly_pubsub::{landing::LandingTargetMessage, odom::OdomMessage};
-use nalgebra::{Isometry3, Translation3, Vector3};
-use std::collections::VecDeque;
-
-pub fn pose_at(history: &VecDeque<OdomMessage>, stamp: f64) -> Option<Isometry3<f64>> {
-    if !stamp.is_finite() {
-        return None;
-    }
-    let before = history.iter().rev().find(|p| p.timestamp <= stamp)?;
-    let after = history.iter().find(|p| p.timestamp >= stamp)?;
-    if after.timestamp - before.timestamp > 0.05 || !before.is_initialized || !after.is_initialized
-    {
-        return None;
-    }
-    let fraction = if after.timestamp == before.timestamp {
-        0.
-    } else {
-        (stamp - before.timestamp) / (after.timestamp - before.timestamp)
-    };
-    let left = before.body_pose(firefly_base::FrameId::ODOM).ok()?;
-    let right = after.body_pose(firefly_base::FrameId::ODOM).ok()?;
-    Some(Isometry3::from_parts(
-        Translation3::from(
-            left.isometry()
-                .translation
-                .vector
-                .lerp(&right.isometry().translation.vector, fraction),
-        ),
-        left.isometry()
-            .rotation
-            .slerp(&right.isometry().rotation, fraction),
-    ))
-}
+use firefly_pubsub::landing::LandingTargetMessage;
+use nalgebra::{Isometry3, Vector3};
 
 /// 本次激活周期持有的标定与几何门限。
 pub(crate) struct Settings {
@@ -261,6 +230,9 @@ impl Tracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use firefly_odometry::PoseBracket;
+    use firefly_pubsub::odom::OdomMessage;
+    use std::collections::VecDeque;
 
     #[test]
     fn acquisition_requires_consecutive_confirmation_and_retains_tracked_identity() {
@@ -368,8 +340,17 @@ mod tests {
                 ..OdomMessage::default()
             },
         ]);
-        assert!((pose_at(&history, 1.01).unwrap().translation.x - 0.1).abs() < 1e-10);
-        assert!(pose_at(&history, 0.99).is_none());
-        assert!(pose_at(&history, 1.03).is_none());
+        assert!(
+            (PoseBracket::find(&history, 1.01, 0.05)
+                .and_then(|pair| pair.pose())
+                .unwrap()
+                .translation
+                .x
+                - 0.1)
+                .abs()
+                < 1e-10
+        );
+        assert!(PoseBracket::find(&history, 0.99, 0.05).is_none());
+        assert!(PoseBracket::find(&history, 1.03, 0.05).is_none());
     }
 }

@@ -166,8 +166,21 @@ impl<T: Debug + ZeroCopySend + 'static> Publisher<T> {
     where
         T: Default,
     {
+        self.try_publish_with(|value| {
+            fill(value);
+            Ok(())
+        })
+    }
+
+    pub(crate) fn try_publish_with(
+        &self,
+        fill: impl FnOnce(&mut T) -> Result<(), Error>,
+    ) -> Result<TraceContext, Error>
+    where
+        T: Default,
+    {
         let mut sample = self.publisher.loan().map_err(loan_error)?;
-        fill(sample.payload_mut());
+        fill(sample.payload_mut())?;
         self.send_sample(sample).map(|(_, ctx)| ctx)
     }
 }

@@ -3,11 +3,10 @@ mod pixels;
 
 use firefly_pubsub::{
     camera::{
-        CAMERA_LEFT_TOPIC, DEPTH_TOPIC, DepthImageMessage, GrayImageMessage, IMAGE_HEIGHT,
+        CAMERA_LEFT_TOPIC, DEPTH_TOPIC, DepthImagePublisher, GrayImageMessage, IMAGE_HEIGHT,
         IMAGE_WIDTH,
     },
     node::create_node,
-    publish::Publisher,
     subscriber::{Subscriber, SubscriberOptions},
     viz::{ScalarMessage, VizPublisher},
 };
@@ -57,8 +56,7 @@ fn run_app() -> firefly_error::Result<()> {
             max_publishers: Some(2),
         },
     )?;
-    let output = Publisher::<DepthImageMessage>::with_topic(&node, DEPTH_TOPIC)?;
-    let mut cpu_output = Vec::new();
+    let output = DepthImagePublisher::open(&node, DEPTH_TOPIC, None)?;
     let diagnostics = VizPublisher::new(&node)?;
     let mut next_report = Instant::now();
     let mut count = 0_u64;
@@ -89,17 +87,12 @@ fn run_app() -> firefly_error::Result<()> {
         let started = Instant::now();
         let stamp = frame.timestamp;
         firefly_observability::set_sim_time(stamp);
-        let input = pixels.input(&frame.data);
+        let (input, restore) = pixels.input(&frame.data);
         drop(sample);
-        let (side, values) = model.run(input, &mut cpu_output)?;
-        let mut center_depth = 0.0;
-        output.publish_with(|m| {
-            m.timestamp = stamp;
-            m.sensor_id = 0;
-            m.width = IMAGE_WIDTH as u32;
-            m.height = IMAGE_HEIGHT as u32;
-            pixels.restore_into(side, values, &mut m.data);
-            center_depth = m.data[IMAGE_WIDTH * (IMAGE_HEIGHT / 2) + IMAGE_WIDTH / 2];
+        let center_depth = model.run(input, |side, values| {
+            let (pixels, center) = restore.restore(side, values);
+            output.publish_pixels(stamp, 0, pixels)?;
+            Ok(center)
         })?;
         count += 1;
         if Instant::now() >= next_report {

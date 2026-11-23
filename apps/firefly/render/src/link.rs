@@ -11,9 +11,8 @@ use bevy::prelude::*;
 use fastrace::prelude::*;
 use firefly_pubsub::camera::FrameCadence;
 use firefly_pubsub::camera::{
-    CAMERA_DOWN_TOPIC, CAMERA_LEFT_TOPIC, CAMERA_RIGHT_TOPIC, DEPTH_TOPIC, DOWN_HEIGHT,
-    DOWN_SENSOR_ID, DOWN_WIDTH, DepthImageMessage, DownImageMessage, GrayImageMessage,
-    IMAGE_HEIGHT, IMAGE_WIDTH,
+    CAMERA_DOWN_TOPIC, CAMERA_LEFT_TOPIC, CAMERA_RIGHT_TOPIC, DEPTH_TOPIC, DOWN_SENSOR_ID,
+    DepthImagePublisher, DownImagePublisher, GrayImagePublisher,
 };
 use firefly_pubsub::event::{CAMERA_PAIR_TOPIC, TopicNotifier};
 use firefly_pubsub::node::{IpcNode, create_node};
@@ -63,10 +62,10 @@ pub fn open_ports(offline: bool) -> Result<IpcPorts, firefly_error::Error> {
 
 /// 传感器发布端口只在像素工作线程构造和使用，节点最后释放。
 struct SensorPublishers {
-    left_pub: Publisher<GrayImageMessage>,
-    right_pub: Publisher<GrayImageMessage>,
-    depth_pub: Option<Publisher<DepthImageMessage>>,
-    down_pub: Publisher<DownImageMessage>,
+    left_pub: GrayImagePublisher,
+    right_pub: GrayImagePublisher,
+    depth_pub: Option<DepthImagePublisher>,
+    down_pub: DownImagePublisher,
     pair_notify: TopicNotifier,
     viz_pub: VizPublisher,
     _node: IpcNode,
@@ -83,12 +82,12 @@ impl SensorPublishers {
             }
         };
         Ok(Self {
-            left_pub: Publisher::with_topic(&node, &topic(CAMERA_LEFT_TOPIC))?,
-            right_pub: Publisher::with_topic(&node, &topic(CAMERA_RIGHT_TOPIC))?,
+            left_pub: GrayImagePublisher::open(&node, &topic(CAMERA_LEFT_TOPIC), None)?,
+            right_pub: GrayImagePublisher::open(&node, &topic(CAMERA_RIGHT_TOPIC), None)?,
             depth_pub: offline
-                .then(|| Publisher::with_topic(&node, &topic(DEPTH_TOPIC)))
+                .then(|| DepthImagePublisher::open(&node, &topic(DEPTH_TOPIC), None))
                 .transpose()?,
-            down_pub: Publisher::with_topic(&node, &topic(CAMERA_DOWN_TOPIC))?,
+            down_pub: DownImagePublisher::open(&node, &topic(CAMERA_DOWN_TOPIC), None)?,
             pair_notify: TopicNotifier::with_topic(&node, &topic(CAMERA_PAIR_TOPIC))?,
             viz_pub: VizPublisher::new(&node)?,
             _node: node,
@@ -405,13 +404,10 @@ fn publish(ports: &SensorPublishers, result: &ProcessedCapture) {
         publish_depth(labels, result.depth, result.stamp);
     }
     if let Some(image) = &result.down_gray
-        && let Err(error) = ports.down_pub.publish_with(|message| {
-            message.timestamp = result.stamp;
-            message.sensor_id = DOWN_SENSOR_ID;
-            message.width = DOWN_WIDTH as u32;
-            message.height = DOWN_HEIGHT as u32;
-            message.data.copy_from_slice(image);
-        })
+        && let Err(error) =
+            ports
+                .down_pub
+                .publish_pixels(result.stamp, DOWN_SENSOR_ID, image.iter().copied())
     {
         log::error!("down image publication: {error}");
     }
@@ -451,27 +447,15 @@ fn publish(ports: &SensorPublishers, result: &ProcessedCapture) {
 }
 
 /// 灰度发布（行主序，`sensor_id` 左右目区分）。
-fn publish_gray(publisher: &Publisher<GrayImageMessage>, gray: &[u8], stamp: f64, sensor_id: i32) {
-    if let Err(e) = publisher.publish_with(|msg| {
-        msg.timestamp = stamp;
-        msg.sensor_id = sensor_id;
-        msg.width = IMAGE_WIDTH as u32;
-        msg.height = IMAGE_HEIGHT as u32;
-        msg.data.copy_from_slice(gray);
-    }) {
+fn publish_gray(publisher: &GrayImagePublisher, gray: &[u8], stamp: f64, sensor_id: i32) {
+    if let Err(e) = publisher.publish_pixels(stamp, sensor_id, gray.iter().copied()) {
         log::warn!("灰度发布失败（id={sensor_id}）：{e:?}");
     }
 }
 
 /// 深度发布（米制 f32，行主序；离线几何标签）。
-fn publish_depth(publisher: &Publisher<DepthImageMessage>, depth: &[f32], stamp: f64) {
-    if let Err(e) = publisher.publish_with(|msg| {
-        msg.timestamp = stamp;
-        msg.sensor_id = 0;
-        msg.width = IMAGE_WIDTH as u32;
-        msg.height = IMAGE_HEIGHT as u32;
-        msg.data.copy_from_slice(depth);
-    }) {
+fn publish_depth(publisher: &DepthImagePublisher, depth: &[f32], stamp: f64) {
+    if let Err(e) = publisher.publish_pixels(stamp, 0, depth.iter().copied()) {
         log::warn!("深度发布失败：{e:?}");
     }
 }

@@ -2,6 +2,7 @@ mod archive;
 pub mod config;
 mod frames;
 pub mod ingress;
+mod observation;
 mod schema;
 mod segments;
 mod status;

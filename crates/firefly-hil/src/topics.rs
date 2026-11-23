@@ -2,7 +2,7 @@ use crate::protocol::{Kind, Message};
 use firefly_pubsub::{
     activity::ActivityMessage,
     attitude::AttitudeMessage,
-    camera::{DownImageMessage, GrayImageMessage},
+    camera::{DownImageMessage, DownImagePublisher, GrayImageMessage, GrayImagePublisher},
     command::CommandMessage,
     event::TopicNotifier,
     fc_status::{FC_STATUS_BUFFER_SIZE, FC_STATUS_TOPIC, FcStatusMessage},
@@ -215,9 +215,9 @@ pub struct SensorPublishers {
     pub requests: RequestsPublishers,
     pub imu: Publisher<ImuMessage>,
     pub imu_notify: TopicNotifier,
-    pub left: Publisher<GrayImageMessage>,
-    pub right: Publisher<GrayImageMessage>,
-    pub down: Publisher<DownImageMessage>,
+    pub left: GrayImagePublisher,
+    pub right: GrayImagePublisher,
+    pub down: DownImagePublisher,
 }
 impl SensorPublishers {
     /// # Errors
@@ -236,19 +236,19 @@ impl SensorPublishers {
                 &topic(prefix, firefly_pubsub::imu::IMU_TOPIC),
             )
             .map_err(io::Error::other)?,
-            left: Publisher::with_topic_and_buffer(
+            left: GrayImagePublisher::open(
                 node,
                 &topic(prefix, firefly_pubsub::camera::CAMERA_LEFT_TOPIC),
                 Some(2),
             )
             .map_err(io::Error::other)?,
-            right: Publisher::with_topic_and_buffer(
+            right: GrayImagePublisher::open(
                 node,
                 &topic(prefix, firefly_pubsub::camera::CAMERA_RIGHT_TOPIC),
                 Some(2),
             )
             .map_err(io::Error::other)?,
-            down: Publisher::with_topic_and_buffer(
+            down: DownImagePublisher::open(
                 node,
                 &topic(prefix, firefly_pubsub::camera::CAMERA_DOWN_TOPIC),
                 Some(2),

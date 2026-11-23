@@ -612,33 +612,33 @@ impl GridMap {
     /// Visit x-contiguous inflated runs within the occupancy window. Integer bounds are
     /// half-open; callers can preserve the exact lattice without serializing every voxel.
     /// Virtual walls remain a query-time constraint and are not included here.
-    pub fn visit_inflated_runs(&self, mut visit: impl FnMut([i32; 3], [i32; 3])) {
-        if !self.initialized {
-            return;
-        }
-        for z in self.low.z..=self.high.z {
-            for y in self.low.y..=self.high.y {
-                let mut start = None;
-                let address = self.inf_address(Index::new(self.low.x, y, z));
-                let stride = self.inf_size.x as usize;
-                let offset = address % stride;
-                let row = &self.inflate[address - offset..][..stride];
-                let counts = row[offset..]
-                    .iter()
-                    .chain(&row[..offset])
-                    .take(self.size.x as usize);
-                for (x, &count) in (self.low.x..=self.high.x).zip(counts) {
-                    let occupied = count > 0;
-                    if occupied && start.is_none() {
-                        start = Some(x);
-                    } else if !occupied && let Some(begin) = start.take() {
-                        visit([begin, y, z], [x, y + 1, z + 1]);
-                    }
-                }
-                if let Some(begin) = start {
-                    visit([begin, y, z], [self.high.x + 1, y + 1, z + 1]);
-                }
-            }
-        }
+    pub fn inflated_runs(&self) -> impl Iterator<Item = ([i32; 3], [i32; 3])> + '_ {
+        let low = self.low;
+        let high = self.high;
+        (low.z..=high.z)
+            .take_while(|_| self.initialized)
+            .flat_map(move |z| {
+                (low.y..=high.y).flat_map(move |y| {
+                    let address = self.inf_address(Index::new(low.x, y, z));
+                    let stride = self.inf_size.x as usize;
+                    let offset = address % stride;
+                    let row = &self.inflate[address - offset..][..stride];
+                    let counts = row[offset..]
+                        .iter()
+                        .chain(&row[..offset])
+                        .take(self.size.x as usize);
+                    let mut start = None;
+                    (low.x..=high.x + 1)
+                        .zip(counts.map(|count| *count > 0).chain(std::iter::once(false)))
+                        .filter_map(move |(x, occupied)| {
+                            if occupied {
+                                start.get_or_insert(x);
+                                None
+                            } else {
+                                start.take().map(|begin| ([begin, y, z], [x, y + 1, z + 1]))
+                            }
+                        })
+                })
+            })
     }
 }

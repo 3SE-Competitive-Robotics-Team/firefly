@@ -271,7 +271,9 @@ else:
 #[test]
 #[ignore = "requires the synced workspace Python environment"]
 fn cif_down_image_roundtrip_preserves_every_pixel_and_dimensions() {
-    use firefly_pubsub::camera::{DOWN_HEIGHT, DOWN_SENSOR_ID, DOWN_WIDTH, DownImageMessage};
+    use firefly_pubsub::camera::{
+        DOWN_HEIGHT, DOWN_SENSOR_ID, DOWN_WIDTH, DownImageMessage, DownImagePublisher,
+    };
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -279,7 +281,7 @@ fn cif_down_image_roundtrip_preserves_every_pixel_and_dimensions() {
     let request = format!("Firefly/Test/Interop/Down/{unique}/Request");
     let response = format!("Firefly/Test/Interop/Down/{unique}/Response");
     let node = create_node().unwrap();
-    let publisher = Publisher::<DownImageMessage>::with_topic(&node, &request).unwrap();
+    let publisher = DownImagePublisher::open(&node, &request, None).unwrap();
     let subscriber = Subscriber::<DownImageMessage>::with_topic(&node, &response).unwrap();
     let peer = PEER.replace("OdomMessage", "DownImageMessage")
         .replace("assert msg.timestamp == 12.5 and msg.position_x == 2.5", "assert msg.timestamp == 12.5 and (msg.width, msg.height, msg.sensor_id) == (352, 288, 3)")
@@ -292,15 +294,11 @@ fn cif_down_image_roundtrip_preserves_every_pixel_and_dimensions() {
     let mut received = false;
     while Instant::now() < deadline {
         publisher
-            .publish_with(|message| {
-                message.timestamp = if received { 14.5 } else { 12.5 };
-                message.width = DOWN_WIDTH as u32;
-                message.height = DOWN_HEIGHT as u32;
-                message.sensor_id = DOWN_SENSOR_ID;
-                for (index, pixel) in message.data.iter_mut().enumerate() {
-                    *pixel = (index % 256) as u8;
-                }
-            })
+            .publish_pixels(
+                if received { 14.5 } else { 12.5 },
+                DOWN_SENSOR_ID,
+                (0..DOWN_WIDTH * DOWN_HEIGHT).map(|index| (index % 256) as u8),
+            )
             .unwrap();
         if let Some(sample) = subscriber.receive().unwrap() {
             assert_eq!(

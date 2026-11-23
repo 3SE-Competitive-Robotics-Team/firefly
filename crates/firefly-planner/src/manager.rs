@@ -324,21 +324,17 @@ impl PlannerManager {
         }
         let horizon = self.horizon(start.position.coords);
         let peers = self.peers_at(now);
-        let previous = self
-            .local
-            .as_ref()
-            .map(|local| (local.traj.clone(), now - local.start_time));
         let source = if random {
             InitSource::RandomStart {
                 mid: self.random_mid(start.position.coords, horizon.target, &mut rand::rng()),
             }
         } else if !poly_init
             && self.motion_context.is_none()
-            && let Some((previous, elapsed)) = &previous
+            && let Some(previous) = &self.local
         {
             InitSource::WarmStart {
-                prev: previous,
-                elapsed: *elapsed,
+                prev: &previous.traj,
+                elapsed: now - previous.start_time,
                 global: &self.global.traj,
                 global_start: self.global.last_glb_t_of_lc_tgt - self.global.start_time,
                 global_end: self.global.glb_t_of_lc_tgt - self.global.start_time,

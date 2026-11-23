@@ -70,7 +70,7 @@ impl Pairing {
             return Ok(());
         }
         let mut image = ManagedImage::new(IMAGE_WIDTH, IMAGE_HEIGHT);
-        for (destination, source) in image.data_mut().iter_mut().zip(packet.data) {
+        for (destination, source) in image.data_mut().iter_mut().zip(packet.data.iter().copied()) {
             *destination = u16::from(source) << 8;
         }
         let queue = if camera == 0 {

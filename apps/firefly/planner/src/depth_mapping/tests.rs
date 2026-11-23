@@ -77,7 +77,8 @@ fn pairing_drops_old_frames_and_retains_future_frames() {
         frame(1.02, 500, now),
         frame(1.06, 500, now),
     ]);
-    let (paired, pose) = take_pair(&mut pending, &poses, now, 0.05).unwrap();
+    let (paired, bracket) = take_pair(&mut pending, &poses, now, 0.05).unwrap();
+    let pose = bracket.pose().unwrap();
     assert_eq!(paired.timestamp, 1.02);
     assert!((pose.translation.vector.x - 1.).abs() < 1e-12);
     assert_eq!(pending.len(), 1);
@@ -98,12 +99,15 @@ fn interpolation_uses_measurement_time_without_extrapolation_or_large_gaps() {
     b.quat_z = q.k;
     b.quat_w = q.w;
     let history = VecDeque::from([a, b]);
-    let pose = interpolate_pose(&history, 1.02, 0.05).unwrap();
+    let pose = PoseBracket::find(&history, 1.02, 0.05)
+        .unwrap()
+        .pose()
+        .unwrap();
     assert!((pose.translation.vector.x - 1.).abs() < 1e-12);
     assert!((pose.rotation.angle() - std::f64::consts::FRAC_PI_4).abs() < 1e-12);
-    assert!(interpolate_pose(&history, 0.99, 0.05).is_none());
-    assert!(interpolate_pose(&history, 1.05, 0.05).is_none());
-    assert!(interpolate_pose(&history, 1.02, 0.01).is_none());
+    assert!(PoseBracket::find(&history, 0.99, 0.05).is_none());
+    assert!(PoseBracket::find(&history, 1.05, 0.05).is_none());
+    assert!(PoseBracket::find(&history, 1.02, 0.01).is_none());
 }
 
 #[test]
@@ -446,7 +450,10 @@ fn depth_uses_body_odometry_and_camera_extrinsics_in_order() {
     odom.position_z = 0.2;
     odom.quat_z = q.quaternion().k;
     odom.quat_w = q.quaternion().w;
-    let pose = interpolate_pose(&VecDeque::from([odom]), 1., 0.05).unwrap();
+    let pose = PoseBracket::find(&VecDeque::from([odom]), 1., 0.05)
+        .unwrap()
+        .pose()
+        .unwrap();
     let now = Instant::now();
     for i in 0..4 {
         let time = 1. + f64::from(i) * 0.1;

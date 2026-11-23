@@ -6,7 +6,7 @@ use std::time::Duration;
 use firefly_error::{Error, ErrorKind, Result};
 use firefly_map::{GridMap, VoxelState};
 use firefly_pubsub::node::create_node;
-use firefly_pubsub::viz::{VOXELS_MAX, VizPublisher, VoxelMessage, kind};
+use firefly_pubsub::viz::{VOXELS_MAX, VizPublisher, kind};
 use nalgebra::Vector3;
 
 pub(super) const VOXEL_RESYNC_TICKS: usize = 50;
@@ -299,14 +299,14 @@ impl Renderer {
         for chunk in 0..chunks {
             let begin = chunk * VOXELS_MAX;
             let end = (begin + VOXELS_MAX).min(indices.len());
-            let mut msg = VoxelMessage::base(kind, t, entity);
-            msg.voxel_count = (end - begin) as u32;
-            msg.voxels[..end - begin].copy_from_slice(&indices[begin..end]);
-            msg.voxel_size = size;
-            msg.voxel_origin = origin;
-            msg.chunk_index = chunk as u32;
-            msg.chunk_count = chunks as u32;
-            self.viz_pub.publish(msg)?;
+            self.viz_pub.publish_voxels(kind, t, entity, |msg| {
+                msg.voxel_count = (end - begin) as u32;
+                msg.voxels[..end - begin].copy_from_slice(&indices[begin..end]);
+                msg.voxel_size = size;
+                msg.voxel_origin = origin;
+                msg.chunk_index = chunk as u32;
+                msg.chunk_count = chunks as u32;
+            })?;
         }
         Ok(())
     }
@@ -342,6 +342,7 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use firefly_pubsub::viz::VoxelMessage;
     use firefly_pubsub::{
         subscriber::{Subscriber, SubscriberOptions},
         viz::{VOXEL_BUFFER_SIZE, VOXEL_TOPIC},

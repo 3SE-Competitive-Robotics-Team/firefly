@@ -85,7 +85,9 @@ impl SensorIngress {
                 } else {
                     &self.ports.sensors.right
                 };
-                publisher.publish(*image).map_err(std::io::Error::other)?;
+                publisher
+                    .publish_pixels(image.timestamp, image.sensor_id, image.data.iter().copied())
+                    .map_err(std::io::Error::other)?;
                 publish_image_checksum(&self.ports, &image)?;
                 Ok(0)
             }
@@ -176,23 +178,11 @@ fn publish_assembled(ports: &IngressPorts, image: ChunkAssembly) -> Result<()> {
                 &ports.sensors.right
             };
             publisher
-                .publish_with(|message| {
-                    message.timestamp = timestamp;
-                    message.sensor_id = i32::from(sensor_id);
-                    message.width = width;
-                    message.height = height;
-                    let mut offset = 0;
-                    for chunk in &chunks {
-                        let Some(body) = chunk.as_ref() else { continue };
-                        let payload = &body[IMAGE_CHUNK_HEADER_LEN..];
-                        let end = offset + payload.len();
-                        message.data[offset..end].copy_from_slice(payload);
-                        offset = end;
-                        for &byte in payload {
-                            sum += u64::from(byte);
-                        }
-                    }
-                })
+                .publish_pixels(
+                    timestamp,
+                    i32::from(sensor_id),
+                    chunk_pixels(&chunks, &mut sum),
+                )
                 .map_err(std::io::Error::other)?;
             let side = if sensor_id == 0 { "left" } else { "right" };
             let mut scalar = ScalarMessage::base(timestamp, &format!("hil/camera/{side}"));
@@ -204,6 +194,17 @@ fn publish_assembled(ports: &IngressPorts, image: ChunkAssembly) -> Result<()> {
         other => log::warn!("未知图像传感器 {other}"),
     }
     Ok(())
+}
+
+fn chunk_pixels<'a>(
+    chunks: &'a [Option<Vec<u8>>],
+    sum: &'a mut u64,
+) -> impl Iterator<Item = u8> + 'a {
+    chunks
+        .iter()
+        .flatten()
+        .flat_map(|body| body[IMAGE_CHUNK_HEADER_LEN..].iter().copied())
+        .inspect(|&byte| *sum += u64::from(byte))
 }
 
 fn publish_down(
@@ -220,20 +221,7 @@ fn publish_down(
     ports
         .sensors
         .down
-        .publish_with(|message| {
-            message.timestamp = timestamp;
-            message.sensor_id = DOWN_SENSOR_ID;
-            message.width = DOWN_WIDTH as u32;
-            message.height = DOWN_HEIGHT as u32;
-            let mut offset = 0;
-            for body in chunks.iter().flatten() {
-                let payload = &body[IMAGE_CHUNK_HEADER_LEN..];
-                let end = offset + payload.len();
-                message.data[offset..end].copy_from_slice(payload);
-                offset = end;
-                sum += payload.iter().map(|&v| u64::from(v)).sum::<u64>();
-            }
-        })
+        .publish_pixels(timestamp, DOWN_SENSOR_ID, chunk_pixels(chunks, &mut sum))
         .map_err(std::io::Error::other)?;
     let mut scalar = ScalarMessage::base(timestamp, "hil/camera/down");
     scalar.scalar_count = 4;

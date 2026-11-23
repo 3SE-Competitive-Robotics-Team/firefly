@@ -6,7 +6,7 @@ use firefly_rootslam_mapping::{
         OptimizationOptions, OptimizationResult, optimize_global, optimize_pose_graph,
     },
     loop_closure::{LoopCandidate, LoopDetector, LoopOptions, LoopResult},
-    map::{MapKeyframe, MapPolicy, MapSnapshot, PersistentMap},
+    map::{KeyframeId, MapPolicy, MapSnapshot, PersistentMap},
 };
 use nalgebra::Isometry3;
 use std::{
@@ -167,7 +167,7 @@ impl Drop for MappingWorker {
 }
 
 enum LoopJob {
-    Detect(Arc<MapKeyframe>),
+    Detect(KeyframeId),
     Correct(Arc<MapSnapshot>, Box<LoopCandidate>),
 }
 type LatestMap = Arc<RwLock<Arc<MapSnapshot>>>;
@@ -175,7 +175,7 @@ type LatestMap = Arc<RwLock<Arc<MapSnapshot>>>;
 fn detect_latest(
     detector: &mut LoopDetector,
     latest: &LatestMap,
-    query: &MapKeyframe,
+    query: KeyframeId,
 ) -> Result<LoopResult> {
     // The lock protects only an Arc pointer; geometric work never holds it.
     let snapshot = {
@@ -184,24 +184,28 @@ fn detect_latest(
             .map_err(|_| error("Latest map pointer poisoned"))?;
         Arc::clone(&guard)
     };
-    if !snapshot.keyframes.contains_key(&query.id) {
+    if !snapshot.keyframes.contains_key(&query) {
         return Ok(LoopResult {
-            keyframe: query.id,
+            keyframe: query,
             descriptors: BTreeMap::new(),
             candidate: None,
         });
     }
-    detector.process(&snapshot, query.id)
+    detector.process(&snapshot, query)
 }
 
-fn publish_map(latest: &LatestMap, map: &MapSnapshot) -> Result<Arc<MapSnapshot>> {
+fn publish_map(latest: &LatestMap, map: &MapSnapshot) -> Result<()> {
     // Only the current detector, current published version and at most one PGO
-    // retain full snapshots. Queued detections retain their query payload alone.
+    // retain full snapshots. Queued detections carry only a keyframe ID.
     let snapshot = Arc::new(map.clone());
-    *latest
-        .write()
-        .map_err(|_| error("Latest map pointer poisoned"))? = Arc::clone(&snapshot);
-    Ok(snapshot)
+    let previous = std::mem::replace(
+        &mut *latest
+            .write()
+            .map_err(|_| error("Latest map pointer poisoned"))?,
+        snapshot,
+    );
+    drop(previous);
+    Ok(())
 }
 
 fn correction_snapshot(
@@ -267,7 +271,7 @@ impl LoopWorker {
                         break;
                     }
                     let result = match job {
-                        LoopJob::Detect(query) => detect_latest(&mut detector, &latest, &query)
+                        LoopJob::Detect(query) => detect_latest(&mut detector, &latest, query)
                             .map(|result| LoopEvent::Detected(Box::new(result))),
                         LoopJob::Correct(map, candidate) => {
                             optimize_pose_graph(&map, &optimization)
@@ -378,16 +382,14 @@ impl MapWorkerState {
             }
         }
         self.map.ingest(local);
-        publish_map(&self.latest, &self.map.snapshot)?;
         if !self.loop_closures {
             return Ok(());
         }
+        publish_map(&self.latest, &self.map.snapshot)?;
         for &keyframe in &local.keyframes {
             if self.seen.insert(keyframe) && self.map.snapshot.keyframes.contains_key(&keyframe) {
-                jobs.send(LoopJob::Detect(Arc::new(
-                    self.map.snapshot.keyframes[&keyframe].clone(),
-                )))
-                .map_err(|_| error("Loop worker disconnected"))?;
+                jobs.send(LoopJob::Detect(keyframe))
+                    .map_err(|_| error("Loop worker disconnected"))?;
                 self.pending += 1;
             }
         }
@@ -551,6 +553,7 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use firefly_rootslam_mapping::map::MapKeyframe;
 
     /// 建图 worker 的最小夹具；地图里预置一个关键帧，使回环检测有候选。
     fn ingest_fixture(loop_closures: bool) -> (MapWorkerState, Sender<LoopJob>, Receiver<LoopJob>) {
@@ -886,16 +889,7 @@ mod tests {
     fn queued_detection_does_not_retain_full_snapshots_and_culled_query_is_skipped() {
         let snapshot = Arc::new(MapSnapshot::default());
         let latest: LatestMap = Arc::new(RwLock::new(Arc::clone(&snapshot)));
-        let query = Arc::new(MapKeyframe {
-            id: 10,
-            t_w_b: Isometry3::identity(),
-            active: false,
-            features: vec![],
-            images: None,
-        });
-        let jobs: Vec<_> = (0..100)
-            .map(|_| LoopJob::Detect(Arc::clone(&query)))
-            .collect();
+        let jobs: Vec<_> = (0..100).map(|_| LoopJob::Detect(10)).collect();
         assert_eq!(
             Arc::strong_count(&snapshot),
             2,
@@ -904,7 +898,7 @@ mod tests {
         let mut detector = LoopDetector::new(Calibration::default(), LoopOptions::default());
         for job in jobs {
             if let LoopJob::Detect(query) = job {
-                let result = detect_latest(&mut detector, &latest, &query).unwrap();
+                let result = detect_latest(&mut detector, &latest, query).unwrap();
                 assert_eq!(result.keyframe, 10);
                 assert!(result.candidate.is_none());
             }
