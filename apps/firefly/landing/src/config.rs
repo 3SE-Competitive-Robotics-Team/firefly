@@ -48,10 +48,7 @@ impl Config {
 
 impl Default for Config {
     fn default() -> Self {
-        let rotation = nalgebra::UnitQuaternion::from_matrix(
-            &(firefly_base::rig::down_axes_in_body() * firefly_base::rig::CV_FROM_RENDER),
-        );
-        let q = rotation.quaternion();
+        let mounting = firefly_base::rig::body_from_optical(firefly_base::FrameId::DOWN_CAMERA);
         Self {
             manifest: None,
             backend: model::Backend::Viplite,
@@ -62,8 +59,8 @@ impl Default for Config {
             target_radius_m: 0.8,
             contact_offset_m: 0.020,
             geometry: firefly_landing::geometry::Geometry::default(),
-            camera_position: firefly_base::rig::DOWN_IN_BODY,
-            camera_rotation_xyzw: [q.i, q.j, q.k, q.w],
+            camera_position: mounting.isometry().translation.vector.into(),
+            camera_rotation_xyzw: mounting.isometry().rotation.coords.into(),
         }
     }
 }

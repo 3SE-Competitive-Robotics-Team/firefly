@@ -2,9 +2,8 @@ use firefly_error::{Error, ErrorKind, Result};
 use nalgebra::{
     Isometry3, Matrix3, Matrix4, Matrix6, Point3, Quaternion, Translation3, UnitQuaternion, Vector3,
 };
-use std::collections::BTreeMap;
 
-/// 坐标系标识。0..1024 保留，自定义传感器使用 1024 及以上编号。
+/// 坐标系标识。相机 ID 采用光学坐标（右、下、前）。自定义传感器从 1024 编号。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FrameId(pub u32);
 impl FrameId {
@@ -161,79 +160,6 @@ impl RigidTransform {
     }
 }
 
-/// 同一时刻的几何坐标树；每个 child 唯一 parent，允许不连通子树。
-/// 调用方负责时间同步、插值和新鲜度；本类型不缓存时间历史。
-#[derive(Debug, Default)]
-pub struct FrameTree {
-    parents: BTreeMap<FrameId, RigidTransform>,
-}
-impl FrameTree {
-    /// 插入或更新 parent←child。
-    /// # Errors
-    /// 自环、闭环或修改已注册 child 的 parent。失败不修改树。
-    #[fastrace::trace]
-    pub fn set(&mut self, t: RigidTransform) -> Result<()> {
-        if t.target == t.source {
-            return Err(invalid("self edge in frame tree"));
-        }
-        if self
-            .parents
-            .get(&t.source)
-            .is_some_and(|old| old.target != t.target)
-        {
-            return Err(invalid("child already has another parent"));
-        }
-        let mut ancestor = t.target;
-        loop {
-            if ancestor == t.source {
-                return Err(invalid("cycle in frame tree"));
-            }
-            let Some(edge) = self.parents.get(&ancestor) else {
-                break;
-            };
-            ancestor = edge.target;
-        }
-        self.parents.insert(t.source, t);
-        Ok(())
-    }
-    /// 沿父链累乘变换至根帧。
-    fn to_root(&self, frame: FrameId) -> RigidTransform {
-        let mut pose = Isometry3::identity();
-        let mut target = frame;
-        while let Some(edge) = self.parents.get(&target) {
-            pose = edge.pose * pose;
-            target = edge.target;
-        }
-        RigidTransform {
-            target,
-            source: frame,
-            pose,
-        }
-    }
-    /// 经公共祖先查询 target←source，支持反向查询。
-    /// # Errors
-    /// 坐标系未注册或不连通。
-    #[fastrace::trace]
-    pub fn lookup(&self, target: FrameId, source: FrameId) -> Result<RigidTransform> {
-        for frame in [target, source] {
-            if !self.parents.contains_key(&frame)
-                && !self.parents.values().any(|edge| edge.target == frame)
-            {
-                return Err(Error::new(ErrorKind::NotFound, "unknown coordinate frame"));
-            }
-        }
-        let a = self.to_root(target);
-        let b = self.to_root(source);
-        if a.target != b.target {
-            return Err(Error::new(
-                ErrorKind::NotFound,
-                "disconnected coordinate frames",
-            ));
-        }
-        // T_target_source = T_root_target⁻¹ · T_root_source（`inv_mul` 即 `self⁻¹·rhs`）。
-        RigidTransform::from_isometry(target, source, a.pose.inv_mul(&b.pose))
-    }
-}
 fn invalid(message: &str) -> Error {
     Error::new(ErrorKind::InvalidArgument, message)
 }
@@ -242,7 +168,7 @@ fn invalid(message: &str) -> Error {
 mod tests {
     use super::*;
     #[test]
-    fn composition_reverse_queries_and_tree_invariants() {
+    fn composition_and_inverse_respect_frame_direction() {
         let q = std::f64::consts::FRAC_PI_4;
         let map_odom = RigidTransform::from_parts(
             FrameId::MAP,
@@ -258,30 +184,14 @@ mod tests {
             [0., 0., 0., 1.],
         )
         .unwrap();
-        let mut tree = FrameTree::default();
-        tree.set(map_odom).unwrap();
-        tree.set(odom_body).unwrap();
-        let map_body = tree.lookup(FrameId::MAP, FrameId::BODY).unwrap();
+        let map_body = map_odom.compose(&odom_body).unwrap();
         assert!((map_body.point(Point3::origin()) - Point3::new(10., 2., 0.)).norm() < 1e-12);
         assert!((map_body.vector(Vector3::x()) - Vector3::y()).norm() < 1e-12);
-        let inverse = tree.lookup(FrameId::BODY, FrameId::MAP).unwrap();
+        let inverse = map_body.inverse();
         assert!(
             (inverse.compose(&map_body).unwrap().matrix() - Matrix4::identity()).norm() < 1e-12
         );
         assert!(odom_body.compose(&map_odom).is_err());
-        assert!(tree.set(map_body).is_err());
-        assert!(tree.set(inverse).is_err());
-        assert!(tree.lookup(FrameId(1024), FrameId::BODY).is_err());
-        tree.set(
-            RigidTransform::from_parts(FrameId(1024), FrameId(1025), [0.; 3], [0., 0., 0., 1.])
-                .unwrap(),
-        )
-        .unwrap();
-        assert!(tree.lookup(FrameId(1024), FrameId::BODY).is_err());
-        assert!(
-            (tree.lookup(FrameId::MAP, FrameId::BODY).unwrap().matrix() - map_body.matrix()).norm()
-                < 1e-12
-        );
     }
     #[test]
     fn adjoint_matches_conjugation_and_covariance_roundtrip() {

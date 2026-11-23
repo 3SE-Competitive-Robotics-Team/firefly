@@ -1,10 +1,9 @@
 //! 机体 `BODY`：`+x` 前、`+y` 左、`+z` 上（与 `MuJoCo` 一致）。
-//! 相机：`+x` 图右、`+y` 图上、光轴 `−z`；图右对应机体 `−y`，光轴下倾 [`DOWNTILT_DEG`]。
-//! CV 光学约定（`+x` 右、`+y` 下、`+z` 前）经 [`CV_FROM_RENDER`]（绕 x 轴 180°）转换。
+//! 相机光学坐标为图右、图下、镜头前方。前视光轴下倾 [`DOWNTILT_DEG`]。
 
 use nalgebra::{Matrix3, UnitQuaternion, Vector3};
 
-use crate::frames::{FrameId, FrameTree, RigidTransform};
+use crate::frames::{FrameId, RigidTransform};
 
 pub const DOWNTILT_DEG: f64 = 20.0;
 pub const FOV_Y_DEG: f64 = 70.88;
@@ -21,12 +20,6 @@ pub const DEPTH_IN_BODY: [f64; 3] = [CAMERA_FORWARD_M, 0.0, 0.0];
 /// 下视光心后移 3 cm；仿真标称高度与机体原点相同，实机外参以标定为准。
 pub const DOWN_IN_BODY: [f64; 3] = [-0.03, 0.0, 0.0];
 
-/// 下视相机 render 轴：图右朝机体右，图上朝机头，−z 光轴朝下。
-#[must_use]
-pub fn down_axes_in_body() -> Matrix3<f64> {
-    Matrix3::new(0., 1., 0., -1., 0., 0., 0., 0., 1.)
-}
-
 /// 对称透视投影的主点，使用左上像素中心为 `(0, 0)` 的图像坐标。
 /// GPU 帧缓冲原点在像素边界，读取到图像数组后必须减去半个像素。
 #[must_use]
@@ -40,23 +33,6 @@ pub const CAMERAS: [FrameId; 4] = [
     FrameId::DEPTH_CAMERA,
     FrameId::DOWN_CAMERA,
 ];
-
-/// CV 光学约定 ← 相机约定（绕 x 轴 180°）。
-pub const CV_FROM_RENDER: Matrix3<f64> = Matrix3::new(
-    1.0, 0.0, 0.0, //
-    0.0, -1.0, 0.0, //
-    0.0, 0.0, -1.0,
-);
-
-/// 相机各轴在机体系（列 = 轴）：图右 `−y`、图上（下倾后）、光轴 `−z`。
-#[must_use]
-pub fn cam_axes_in_body() -> Matrix3<f64> {
-    let tilt = DOWNTILT_DEG.to_radians();
-    let x = Vector3::new(0.0, -1.0, 0.0);
-    let y = Vector3::new(tilt.sin(), 0.0, tilt.cos());
-    let z = x.cross(&y);
-    Matrix3::from_columns(&[x, y, z])
-}
 
 /// 相机在机体系的位置（米）。
 ///
@@ -78,16 +54,21 @@ pub fn position_in_body(camera: FrameId) -> Vector3<f64> {
     Vector3::from(p)
 }
 
-/// `T_body_camera`：相机在机体系的位姿。
+/// 将光学坐标（右、下、前）变换到机体坐标（前、左、上）。
 ///
 /// # Panics
 /// `camera` 不是 rig 相机坐标系。
 #[must_use]
-pub fn body_from_camera(camera: FrameId) -> RigidTransform {
+pub fn body_from_optical(camera: FrameId) -> RigidTransform {
     let axes = if camera == FrameId::DOWN_CAMERA {
-        down_axes_in_body()
+        Matrix3::from_columns(&[-Vector3::y(), -Vector3::x(), -Vector3::z()])
     } else {
-        cam_axes_in_body()
+        let (sin, cos) = DOWNTILT_DEG.to_radians().sin_cos();
+        Matrix3::from_columns(&[
+            -Vector3::y(),
+            Vector3::new(-sin, 0.0, -cos),
+            Vector3::new(cos, 0.0, -sin),
+        ])
     };
     let uq = UnitQuaternion::from_matrix(&axes);
     let q = uq.quaternion();
@@ -100,50 +81,33 @@ pub fn body_from_camera(camera: FrameId) -> RigidTransform {
     .expect("finite unit rig calibration")
 }
 
-/// rig 坐标树（机体系 + 四个相机，同一时刻快照）。
-///
-/// # Panics
-/// rig 边构成环（编译期常量下不可能）。
-#[must_use]
-pub fn tree() -> FrameTree {
-    let mut tree = FrameTree::default();
-    for camera in CAMERAS {
-        tree.set(body_from_camera(camera))
-            .expect("rig tree is acyclic");
-    }
-    tree
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn axes_are_orthonormal_right_handed() {
-        let r = cam_axes_in_body();
-        assert!((r.transpose() * r - Matrix3::identity()).norm() < 1e-12);
-        assert!((r.determinant() - 1.0).abs() < 1e-12);
-        let view = -r.column(2);
-        assert!(view.x > 0.9, "光轴须指向前方: {view}");
-        assert!((view.z + DOWNTILT_DEG.to_radians().sin()).abs() < 1e-12);
-    }
-
-    #[test]
-    fn tree_lookup_matches_direct_transform() {
-        let tree = tree();
+    fn optical_axes_match_camera_mounts() {
+        let (sin, cos) = DOWNTILT_DEG.to_radians().sin_cos();
         for camera in CAMERAS {
-            let via_tree = tree.lookup(FrameId::BODY, camera).unwrap();
-            let direct = body_from_camera(camera);
-            assert!((via_tree.matrix() - direct.matrix()).norm() < 1e-12);
-            let back = tree.lookup(camera, FrameId::BODY).unwrap();
-            assert!((back.matrix() - direct.inverse().matrix()).norm() < 1e-12);
+            let mounting = body_from_optical(camera);
+            assert_eq!(
+                (mounting.target(), mounting.source()),
+                (FrameId::BODY, camera)
+            );
+            let forward = if camera == FrameId::DOWN_CAMERA {
+                -Vector3::z()
+            } else {
+                Vector3::new(cos, 0., -sin)
+            };
+            assert!((mounting.vector(Vector3::x()) + Vector3::y()).norm() < 1e-12);
+            assert!((mounting.vector(Vector3::z()) - forward).norm() < 1e-12);
         }
     }
 
     #[test]
     fn camera_positions_preserve_lateral_baseline_and_centered_depth() {
-        let l = body_from_camera(FrameId::LEFT_CAMERA).point(nalgebra::Point3::origin());
-        let r = body_from_camera(FrameId::RIGHT_CAMERA).point(nalgebra::Point3::origin());
+        let l = body_from_optical(FrameId::LEFT_CAMERA).point(nalgebra::Point3::origin());
+        let r = body_from_optical(FrameId::RIGHT_CAMERA).point(nalgebra::Point3::origin());
         let delta = r - l;
         assert!(delta.x.abs() < 1e-12 && delta.z.abs() < 1e-12);
         assert!((delta.y - BASELINE).abs() < 1e-12);

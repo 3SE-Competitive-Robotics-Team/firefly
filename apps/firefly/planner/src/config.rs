@@ -135,15 +135,13 @@ impl Default for DepthOptions {
     fn default() -> Self {
         use firefly_base::{FrameId, rig};
         use firefly_pubsub::camera::{IMAGE_HEIGHT, IMAGE_WIDTH};
-        let rotation =
-            nalgebra::UnitQuaternion::from_matrix(&(rig::cam_axes_in_body() * rig::CV_FROM_RENDER));
-        let q = rotation.quaternion();
+        let mounting = rig::body_from_optical(FrameId::LEFT_CAMERA);
         let focal = IMAGE_HEIGHT as f64 * 0.5 / (rig::FOV_Y_DEG.to_radians() * 0.5).tan();
         let center = rig::principal_point(IMAGE_WIDTH, IMAGE_HEIGHT);
         Self {
             intrinsics: [focal, focal, center[0], center[1]],
-            translation: rig::position_in_body(FrameId::LEFT_CAMERA).into(),
-            rotation: [q.i, q.j, q.k, q.w],
+            translation: mounting.isometry().translation.vector.into(),
+            rotation: mounting.isometry().rotation.coords.into(),
             use_depth_filter: true,
             depth_filter_mindist: 0.2,
             depth_filter_margin: 2,

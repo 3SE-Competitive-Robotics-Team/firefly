@@ -280,16 +280,11 @@ pub(crate) fn simulator_calibration() -> Calibration<f64> {
     use firefly_base::{FrameId, rig};
     use firefly_calibration::camera::generic_camera::GenericCamera;
     use firefly_pubsub::camera::{IMAGE_HEIGHT, IMAGE_WIDTH};
-    use nalgebra::{Isometry3, Translation3, UnitQuaternion, Vector2, Vector3, Vector4};
     let focal = IMAGE_HEIGHT as f64 * 0.5 / (rig::FOV_Y_DEG.to_radians() * 0.5).tan();
     let center = rig::principal_point(IMAGE_WIDTH, IMAGE_HEIGHT);
     let mut camera = GenericCamera::from_name("pinhole");
     camera.initialize_intrinsics(Vector4::new(focal, focal, center[0], center[1]));
-    let pose = |frame| {
-        let rotation =
-            UnitQuaternion::from_matrix(&(rig::cam_axes_in_body() * rig::CV_FROM_RENDER));
-        Isometry3::from_parts(Translation3::from(rig::position_in_body(frame)), rotation)
-    };
+    let pose = |frame| *rig::body_from_optical(frame).isometry();
     Calibration {
         t_i_c: vec![pose(FrameId::LEFT_CAMERA), pose(FrameId::RIGHT_CAMERA)],
         intrinsics: vec![camera.clone(), camera],

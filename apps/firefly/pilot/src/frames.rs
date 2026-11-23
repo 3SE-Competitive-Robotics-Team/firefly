@@ -1,5 +1,5 @@
 //! 飞控反馈固定在 odom 系；同时间戳的地图位姿仅用于建立 map←odom 边。
-use firefly_base::{FrameId, FrameTree, RigidTransform};
+use firefly_base::{FrameId, RigidTransform};
 use firefly_flight::PositionSetpoint;
 use firefly_pubsub::odom::OdomMessage;
 use firefly_pubsub::reference::ReferenceMessage;
@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 
 #[derive(Default)]
 pub struct ControlFrames {
-    tree: FrameTree,
     history: VecDeque<(f64, RigidTransform, Instant)>,
     corrected: Option<(OdomMessage, Instant)>,
     alignment: Alignment,
@@ -20,6 +19,7 @@ enum Alignment {
     #[default]
     Waiting,
     Valid {
+        odom_from_map: RigidTransform,
         time: f64,
         received: Instant,
     },
@@ -35,9 +35,13 @@ impl Alignment {
             Self::Valid { time, .. } | Self::Invalid { time } => Some(time),
         }
     }
-    fn received(&self) -> Option<Instant> {
+    fn current(&self) -> Option<(RigidTransform, Instant)> {
         match *self {
-            Self::Valid { received, .. } => Some(received),
+            Self::Valid {
+                odom_from_map,
+                received,
+                ..
+            } => Some((odom_from_map, received)),
             Self::Waiting | Self::Invalid { .. } => None,
         }
     }
@@ -60,9 +64,6 @@ impl ControlFrames {
         let Ok(pose) = msg.body_pose(FrameId::ODOM) else {
             return false;
         };
-        if self.tree.set(pose).is_err() {
-            return false;
-        }
         self.history.push_back((msg.timestamp, pose, now));
         while self.history.len() > 256
             || self
@@ -113,12 +114,11 @@ impl ControlFrames {
         let Ok(map_odom) = map_body.compose(&raw.inverse()) else {
             return;
         };
-        if self.tree.set(map_odom).is_ok() {
-            self.alignment = Alignment::Valid {
-                received: received.min(*raw_received),
-                time: msg.timestamp,
-            };
-        }
+        self.alignment = Alignment::Valid {
+            odom_from_map: map_odom.inverse(),
+            received: received.min(*raw_received),
+            time: msg.timestamp,
+        };
     }
     /// `dt` 为参考到 IMU 时刻的传感器时间差（秒），用于外推参考；调用方负责限幅。
     pub fn reference(
@@ -144,10 +144,11 @@ impl ControlFrames {
                 .inverse()
             }
             0 => {
-                if now.duration_since(self.alignment.received()?) > max_age {
+                let (odom_from_map, received) = self.alignment.current()?;
+                if now.duration_since(received) > max_age {
                     return None;
                 }
-                self.tree.lookup(FrameId::ODOM, FrameId::MAP).ok()?
+                odom_from_map
             }
             _ => return None,
         };
@@ -333,10 +334,11 @@ mod tests {
         let mut frames = ControlFrames::default();
         frames.observe_corrected(raw(2.), now);
         frames.observe_odom(&raw(1.), now);
-        assert!(frames.alignment.received().is_none());
+        let received = |frames: &ControlFrames| frames.alignment.current().map(|(_, stamp)| stamp);
+        assert!(received(&frames).is_none());
         frames.observe_odom(&raw(2.), now);
-        assert_eq!(frames.alignment.received(), Some(now));
+        assert_eq!(received(&frames), Some(now));
         frames.observe_corrected(raw(2.), now + Duration::from_secs(1));
-        assert_eq!(frames.alignment.received(), Some(now));
+        assert_eq!(received(&frames), Some(now));
     }
 }

@@ -3525,7 +3525,6 @@ dependencies = [
 name = "firefly-base"
 version = "0.1.0"
 dependencies = [
- "fastrace",
  "firefly-error",
  "nalgebra",
 ]

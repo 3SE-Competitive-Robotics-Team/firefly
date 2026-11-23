@@ -25,7 +25,7 @@ use firefly_pubsub::viz::{ScalarMessage, VizPublisher};
 
 use crate::capture::{CaptureHub, CaptureReply, CaptureRequest, CapturedFrame, SensorKind};
 use crate::process::{CaptureJob, Latest, ProcessedCapture, run_worker};
-use crate::rig::{Eye, PoseState, apply_pose_to_eyes};
+use crate::rig::{CameraMount, Eye, PoseState, apply_pose_to_eyes};
 
 /// 主线程订阅端口束（节点最后声明最后释放，对照 `firefly-pubsub/node` 的 Drop 纪律）。
 ///
@@ -205,7 +205,7 @@ pub fn poll_pose(
     targets: Option<Res<crate::rig::SensorTargets>>,
     mut capture: ResMut<SensorCapture>,
     mut pending: ResMut<PendingFrames>,
-    mut eyes: Query<(&Eye, &mut Transform)>,
+    mut eyes: Query<(&CameraMount, &mut Transform)>,
     mut cameras: Query<(&Eye, &mut Camera)>,
 ) {
     if let Err(error) = ports.rig.update_connections() {

@@ -293,12 +293,8 @@ mod tests {
             }
         }
         let geometry = Geometry::default();
-        let mounting = Isometry3::from_parts(
-            Translation3::new(-0.03, 0., 0.),
-            nalgebra::UnitQuaternion::from_matrix(
-                &(firefly_base::rig::down_axes_in_body() * firefly_base::rig::CV_FROM_RENDER),
-            ),
-        );
+        let mounting =
+            *firefly_base::rig::body_from_optical(firefly_base::FrameId::DOWN_CAMERA).isometry();
         let pose = Some(Isometry3::translation(0., 0., 0.8));
         let detection = Detection {
             bounds: [145., 109., 206., 178.],

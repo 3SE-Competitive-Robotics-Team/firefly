@@ -10,6 +10,7 @@ use bevy::render::RenderApp;
 use bevy::render::extract_component::ExtractComponent;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 use bevy::render::view::{Msaa, Tonemapping};
+use firefly_base::{FrameId, rig};
 use firefly_pubsub::camera::{DOWN_HEIGHT, DOWN_WIDTH, IMAGE_HEIGHT, IMAGE_WIDTH};
 use firefly_pubsub::trace::TraceContext;
 
@@ -20,16 +21,6 @@ pub const FOV_Y_DEG: f32 = firefly_base::rig::FOV_Y_DEG as f32;
 /// 相机下倾角（度）；来源 [`firefly_base::rig::DOWNTILT_DEG`]。
 pub const DOWNTILT_DEG: f32 = firefly_base::rig::DOWNTILT_DEG as f32;
 
-const fn body_vec(p: [f64; 3]) -> Vec3 {
-    Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32)
-}
-
-/// 左目在机体系偏移（米）；来源 [`firefly_base::rig::LEFT_IN_BODY`]。
-pub const LEFT_OFFSET: Vec3 = body_vec(firefly_base::rig::LEFT_IN_BODY);
-/// 右目在机体系偏移（米）；来源 [`firefly_base::rig::RIGHT_IN_BODY`]。
-pub const RIGHT_OFFSET: Vec3 = body_vec(firefly_base::rig::RIGHT_IN_BODY);
-/// 深度相机在机体系偏移（米）；来源 [`firefly_base::rig::DEPTH_IN_BODY`]。
-pub const DEPTH_OFFSET: Vec3 = body_vec(firefly_base::rig::DEPTH_IN_BODY);
 /// 传感器近平面（米，与深度有效下限一致）。
 pub const SENSOR_NEAR: f32 = 0.05;
 /// 传感器远平面（米，仅文档口径：`Bevy` 用无限远反向 Z，远裁剪由
@@ -66,44 +57,44 @@ pub struct SensorTargets {
     pub down: Handle<Image>,
 }
 
-#[must_use]
-pub fn eye_transform(pos: Vec3, quat: Quat, offset: Vec3) -> Transform {
-    Transform {
-        translation: pos + quat * offset,
-        rotation: quat * cam_mount(),
-        ..default()
+#[derive(Component)]
+pub struct CameraMount(Transform);
+
+impl CameraMount {
+    fn new(frame: FrameId) -> Self {
+        let optical = rig::body_from_optical(frame);
+        let pose = optical.isometry();
+        // Bevy 看向 −Z，图像上方是 +Y。绕 X 半周后得到共享光学轴。
+        let optical_from_bevy = Quat::from_xyzw(1., 0., 0., 0.);
+        let rotation = Quat::from_array(pose.rotation.coords.cast::<f32>().into());
+        Self(Transform {
+            translation: Vec3::from_array(pose.translation.vector.cast::<f32>().into()),
+            rotation: rotation * optical_from_bevy,
+            ..default()
+        })
     }
-}
 
-/// 相机 mounting 旋转（相机轴 → 机体系，列 = 相机轴）；来源 [`firefly_base::rig`]。
-fn cam_mount() -> Quat {
-    let a = firefly_base::rig::cam_axes_in_body();
-    let col = |c: usize| Vec3::new(a[(0, c)] as f32, a[(1, c)] as f32, a[(2, c)] as f32);
-    Quat::from_mat3(&Mat3::from_cols(col(0), col(1), col(2)))
-}
+    fn at_pose(&self, pose: &PoseState) -> Transform {
+        Transform {
+            translation: pose.pos + pose.quat * self.0.translation,
+            rotation: pose.quat * self.0.rotation,
+            ..default()
+        }
+    }
 
-fn down_transform(pos: Vec3, quat: Quat) -> Transform {
-    let axes = firefly_base::rig::down_axes_in_body();
-    let column = |c: usize| {
-        Vec3::new(
-            axes[(0, c)] as f32,
-            axes[(1, c)] as f32,
-            axes[(2, c)] as f32,
-        )
-    };
-    Transform {
-        translation: pos + quat * body_vec(firefly_base::rig::DOWN_IN_BODY),
-        rotation: quat * Quat::from_mat3(&Mat3::from_cols(column(0), column(1), column(2))),
-        ..default()
+    fn bundle(frame: FrameId, pose: &PoseState) -> (Self, Transform) {
+        let mount = Self::new(frame);
+        let transform = mount.at_pose(pose);
+        (mount, transform)
     }
 }
 
 /// 传感器投影（固定分辨率，纵横比不跟随窗口）。
 #[must_use]
-pub fn sensor_projection() -> Projection {
+fn camera_projection(aspect_ratio: f32) -> Projection {
     Projection::Perspective(bevy::camera::PerspectiveProjection {
         fov: FOV_Y_DEG.to_radians(),
-        aspect_ratio: IMAGE_WIDTH as f32 / IMAGE_HEIGHT as f32,
+        aspect_ratio,
         near: SENSOR_NEAR,
         far: SENSOR_FAR,
         near_clip_plane: Vec4::new(0.0, 0.0, -1.0, -SENSOR_NEAR),
@@ -169,9 +160,9 @@ pub fn spawn_rig(
     let sensor_layers = RenderLayers::layer(WORLD_LAYER);
 
     // 双目灰度相机：颜色中间纹理用 sRGB 编码，最终输出单通道 BT.601。
-    for (eye, offset, target) in [
-        (Eye::Left, LEFT_OFFSET, left),
-        (Eye::Right, RIGHT_OFFSET, right),
+    for (eye, frame, target) in [
+        (Eye::Left, FrameId::LEFT_CAMERA, left),
+        (Eye::Right, FrameId::RIGHT_CAMERA, right),
     ] {
         commands.spawn((
             Camera {
@@ -181,21 +172,17 @@ pub fn spawn_rig(
             RenderTarget::from(target),
             Camera3d::default(),
             Msaa::Off,
-            sensor_projection(),
+            camera_projection(IMAGE_WIDTH as f32 / IMAGE_HEIGHT as f32),
             Tonemapping::Linear,
             CompositingSpace::Srgb,
             sensor_exposure,
             sensor_layers.clone(),
             env.clone(),
             eye,
-            eye_transform(pose.pos, pose.quat, offset),
+            CameraMount::bundle(frame, &pose),
         ));
     }
 
-    let mut down_projection = sensor_projection();
-    if let Projection::Perspective(projection) = &mut down_projection {
-        projection.aspect_ratio = DOWN_WIDTH as f32 / DOWN_HEIGHT as f32;
-    }
     commands.spawn((
         Camera {
             is_active: false,
@@ -204,14 +191,14 @@ pub fn spawn_rig(
         RenderTarget::from(down),
         Camera3d::default(),
         Msaa::Off,
-        down_projection,
+        camera_projection(DOWN_WIDTH as f32 / DOWN_HEIGHT as f32),
         Tonemapping::Linear,
         CompositingSpace::Srgb,
         sensor_exposure,
         sensor_layers.clone(),
         env.clone(),
         Eye::Down,
-        down_transform(pose.pos, pose.quat),
+        CameraMount::bundle(FrameId::DOWN_CAMERA, &pose),
     ));
 
     commands.spawn((
@@ -224,10 +211,10 @@ pub fn spawn_rig(
         },
         Camera3d::default(),
         Msaa::Off,
-        sensor_projection(),
+        camera_projection(IMAGE_WIDTH as f32 / IMAGE_HEIGHT as f32),
         sensor_layers,
         Eye::Depth,
-        eye_transform(pose.pos, pose.quat, DEPTH_OFFSET),
+        CameraMount::bundle(FrameId::DEPTH_CAMERA, &pose),
         DepthPrepass,
     ));
 }
@@ -235,58 +222,33 @@ pub fn spawn_rig(
 /// Fixed simulated camera rig, with RDF optical axes and pixel-center intrinsics.
 #[must_use]
 pub fn camera_calibrations() -> firefly_pubsub::camera::CameraRig {
-    use firefly_base::rig;
     use firefly_pubsub::camera::{CameraCalibration, CameraRig};
 
-    let camera = |width, height, offset, axes| {
+    let camera = |width, height, frame| {
         let focal = height as f64 * 0.5 / (rig::FOV_Y_DEG.to_radians() * 0.5).tan();
         let [cx, cy] = rig::principal_point(width, height);
-        let rotation = nalgebra::UnitQuaternion::from_matrix(&(axes * rig::CV_FROM_RENDER));
+        let mounting = rig::body_from_optical(frame);
         CameraCalibration {
             resolution: [width as u32, height as u32],
             intrinsics: [focal, focal, cx, cy],
-            translation: offset,
-            rotation_xyzw: rotation.into_inner().coords.into(),
+            translation: mounting.isometry().translation.vector.into(),
+            rotation_xyzw: mounting.isometry().rotation.coords.into(),
         }
     };
     CameraRig {
-        left: camera(
-            IMAGE_WIDTH,
-            IMAGE_HEIGHT,
-            rig::LEFT_IN_BODY,
-            rig::cam_axes_in_body(),
-        ),
-        right: camera(
-            IMAGE_WIDTH,
-            IMAGE_HEIGHT,
-            rig::RIGHT_IN_BODY,
-            rig::cam_axes_in_body(),
-        ),
-        down: camera(
-            DOWN_WIDTH,
-            DOWN_HEIGHT,
-            rig::DOWN_IN_BODY,
-            rig::down_axes_in_body(),
-        ),
+        left: camera(IMAGE_WIDTH, IMAGE_HEIGHT, FrameId::LEFT_CAMERA),
+        right: camera(IMAGE_WIDTH, IMAGE_HEIGHT, FrameId::RIGHT_CAMERA),
+        down: camera(DOWN_WIDTH, DOWN_HEIGHT, FrameId::DOWN_CAMERA),
     }
 }
 
 /// rig 相机摆位（纯函数：`poll_pose` 在同系统内调用，保证渲染用新变换出图）。
-pub fn apply_pose_to_eyes(pose: &PoseState, eyes: &mut Query<(&Eye, &mut Transform)>) {
+pub fn apply_pose_to_eyes(pose: &PoseState, eyes: &mut Query<(&CameraMount, &mut Transform)>) {
     if !pose.has_pose {
         return;
     }
-    for (eye, mut transform) in eyes {
-        let offset = match eye {
-            Eye::Left => LEFT_OFFSET,
-            Eye::Right => RIGHT_OFFSET,
-            Eye::Depth => DEPTH_OFFSET,
-            Eye::Down => {
-                *transform = down_transform(pose.pos, pose.quat);
-                continue;
-            }
-        };
-        *transform = eye_transform(pose.pos, pose.quat, offset);
+    for (mount, mut transform) in eyes {
+        *transform = mount.at_pose(pose);
     }
 }
 
@@ -295,30 +257,65 @@ mod tests {
     use super::*;
 
     #[test]
-    #[allow(clippy::float_cmp)] // IPC 标定的直接字段拷贝要求精确相等。
-    fn rerun_calibration_uses_cv_axes_and_shared_intrinsics() {
-        let firefly_pubsub::camera::CameraRig { left, right, down } = camera_calibrations();
-        assert_eq!(down.resolution, [352, 288]);
-        let assert_camera = |message: &firefly_pubsub::camera::CameraCalibration,
-                             offset: [f64; 3]| {
-            assert_eq!(message.translation, offset);
-            assert_eq!(
-                message.resolution,
-                [IMAGE_WIDTH as u32, IMAGE_HEIGHT as u32]
-            );
-            let rotation = Quat::from_array(message.rotation_xyzw.map(|v| v as f32));
-            let cv_point = Vec3::new(0.2, 0.3, 2.0);
-            let bevy_point = Vec3::new(cv_point.x, -cv_point.y, -cv_point.z);
-            assert!((rotation * cv_point - cam_mount() * bevy_point).length() < 1e-5);
-            assert_eq!(message.intrinsics[2..], [159.5, 119.5]);
+    fn optical_and_bevy_projections_agree_for_each_camera() {
+        let calibration = camera_calibrations();
+        let body = PoseState {
+            pos: Vec3::new(1., -2., 0.5),
+            quat: Quat::from_rotation_z(0.7),
+            ..default()
         };
-        assert_camera(&left, firefly_base::rig::LEFT_IN_BODY);
-        assert_camera(&right, firefly_base::rig::RIGHT_IN_BODY);
+        for (frame, camera, resolution) in [
+            (
+                FrameId::LEFT_CAMERA,
+                calibration.left,
+                [IMAGE_WIDTH, IMAGE_HEIGHT],
+            ),
+            (
+                FrameId::RIGHT_CAMERA,
+                calibration.right,
+                [IMAGE_WIDTH, IMAGE_HEIGHT],
+            ),
+            (
+                FrameId::DOWN_CAMERA,
+                calibration.down,
+                [DOWN_WIDTH, DOWN_HEIGHT],
+            ),
+        ] {
+            assert_eq!(camera.resolution, resolution.map(|v| v as u32));
+            assert_eq!(
+                camera.translation,
+                <[f64; 3]>::from(rig::position_in_body(frame))
+            );
+            assert_eq!(
+                camera.intrinsics[2..],
+                rig::principal_point(resolution[0], resolution[1])
+            );
+            let [width, height] = camera.resolution.map(|v| v as f32);
+            let [fx, fy, cx, cy] = camera.intrinsics.map(|v| v as f32);
+            let optical_rotation = Quat::from_array(camera.rotation_xyzw.map(|v| v as f32));
+            let origin = Vec3::from_array(camera.translation.map(|v| v as f32));
+            let world_from_view = CameraMount::new(frame).at_pose(&body);
+            let clip_from_view = camera_projection(width / height).get_clip_from_view();
+            for point in [Vec3::new(0.2, 0.3, 2.), Vec3::new(-0.4, -0.2, 1.)] {
+                let world = body.pos + body.quat * (origin + optical_rotation * point);
+                let view =
+                    world_from_view.rotation.inverse() * (world - world_from_view.translation);
+                let ndc = clip_from_view.project_point3(view);
+                let pixel =
+                    Vec2::new((ndc.x + 1.) * width, (1. - ndc.y) * height) * 0.5 - Vec2::splat(0.5);
+                let expected = Vec2::new(fx * point.x / point.z + cx, fy * point.y / point.z + cy);
+                assert!(
+                    pixel.distance(expected) < 1e-4,
+                    "{frame:?}: {pixel} vs {expected}"
+                );
+            }
+        }
     }
 
     #[test]
     fn sensor_projection_matches_integer_pixel_centers() {
-        let projection = sensor_projection().get_clip_from_view();
+        let projection =
+            camera_projection(IMAGE_WIDTH as f32 / IMAGE_HEIGHT as f32).get_clip_from_view();
         let focal =
             (IMAGE_HEIGHT as f64 / 2.0) / (firefly_base::rig::FOV_Y_DEG.to_radians() / 2.0).tan();
         let [cx, cy] = firefly_base::rig::principal_point(IMAGE_WIDTH, IMAGE_HEIGHT);

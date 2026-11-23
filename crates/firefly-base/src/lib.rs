@@ -4,4 +4,4 @@ mod frames;
 pub mod rig;
 pub mod se3;
 pub mod stats;
-pub use frames::{FrameId, FrameTree, RigidTransform};
+pub use frames::{FrameId, RigidTransform};
