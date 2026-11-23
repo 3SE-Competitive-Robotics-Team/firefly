@@ -1,7 +1,35 @@
 //! 双目/深度使用 [`IMAGE_WIDTH`] × [`IMAGE_HEIGHT`]，下视使用
 //! [`DOWN_WIDTH`] × [`DOWN_HEIGHT`]；订阅端按对应定长消息接收。
 
+mod publisher;
+pub use publisher::{DepthImagePublisher, DownImagePublisher, GrayImagePublisher};
+
 use iceoryx2::prelude::*;
+
+// Both views use the same IPC name and field layout. The publisher initializes
+// the pixel array in its private slot before any subscriber can see it.
+macro_rules! image_layout {
+    ($(#[$attr:meta])* $vis:vis $name:ident, $wire:literal, $pixel:ty, $len:ident) => {
+        $(#[$attr])*
+        #[repr(C)]
+        #[derive(Debug, Clone, Copy, ZeroCopySend)]
+        #[type_name($wire)]
+        $vis struct $name {
+            pub timestamp: f64,
+            pub sensor_id: i32,
+            pub width: u32,
+            pub height: u32,
+            pub data: [$pixel; $len],
+        }
+    };
+}
+
+macro_rules! image_message {
+    ($(#[$attr:meta])* $name:ident, $slot:ident, $wire:literal, $pixel:ty, $len:ident) => {
+        image_layout!($(#[$attr])* pub $name, $wire, $pixel, $len);
+        image_layout!($slot, $wire, std::mem::MaybeUninit<$pixel>, $len);
+    };
+}
 
 pub const CAMERA_RIG_TOPIC: &str = "Firefly/CameraRig";
 
@@ -36,17 +64,14 @@ pub const CAMERA_DOWN_TOPIC: &str = "Firefly/CameraDown";
 /// 下视相机保留 id；2 为现有深度源。
 pub const DOWN_SENSOR_ID: i32 = 3;
 
-/// 下视原图，独立于双目的分辨率与消息签名。
-#[repr(C)]
-#[derive(Debug, Clone, Copy, ZeroCopySend)]
-#[type_name("FireflyDownImageMessage")]
-pub struct DownImageMessage {
-    pub timestamp: f64,
-    pub sensor_id: i32,
-    pub width: u32,
-    pub height: u32,
-    pub data: [u8; DOWN_SIZE],
-}
+image_message!(
+    /// Downward monochrome frame in row-major order.
+    DownImageMessage,
+    DownSlot,
+    "FireflyDownImageMessage",
+    u8,
+    DOWN_SIZE
+);
 
 impl Default for DownImageMessage {
     #[allow(clippy::large_stack_arrays)]
@@ -67,19 +92,14 @@ pub const CAMERA_LEFT_TOPIC: &str = "Firefly/CameraLeft";
 pub const CAMERA_RIGHT_TOPIC: &str = "Firefly/CameraRight";
 pub const DEPTH_TOPIC: &str = "Firefly/Depth";
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy, ZeroCopySend)]
-#[type_name("FireflyGrayImageMessage")]
-pub struct GrayImageMessage {
-    /// 传感器时钟时间戳（秒）。
-    pub timestamp: f64,
-    /// 相机 id（左目 0 / 右目 1）。
-    pub sensor_id: i32,
-    pub width: u32,
-    pub height: u32,
-    /// 灰度像素（行主序）。
-    pub data: [u8; IMAGE_SIZE],
-}
+image_message!(
+    /// Row-major stereo pixels with a sensor-clock timestamp and left (0) or right (1) ID.
+    GrayImageMessage,
+    GraySlot,
+    "FireflyGrayImageMessage",
+    u8,
+    IMAGE_SIZE
+);
 
 impl Default for GrayImageMessage {
     #[allow(clippy::large_stack_arrays)]
@@ -94,19 +114,14 @@ impl Default for GrayImageMessage {
     }
 }
 
-/// 深度图像消息（定长 f32 数组，米制，零拷贝）。
-#[repr(C)]
-#[derive(Debug, Clone, Copy, ZeroCopySend)]
-#[type_name("FireflyDepthImageMessage")]
-pub struct DepthImageMessage {
-    /// 传感器时钟时间戳（秒）。
-    pub timestamp: f64,
-    pub sensor_id: i32,
-    pub width: u32,
-    pub height: u32,
-    /// 深度像素（米，行主序）。
-    pub data: [f32; IMAGE_SIZE],
-}
+image_message!(
+    /// Axial depth in metres, in row-major left-camera pixel order.
+    DepthImageMessage,
+    DepthSlot,
+    "FireflyDepthImageMessage",
+    f32,
+    IMAGE_SIZE
+);
 
 impl Default for DepthImageMessage {
     #[allow(clippy::large_stack_arrays)]
@@ -124,6 +139,37 @@ impl Default for DepthImageMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn partial_depth_images_are_discarded_and_the_next_loan_is_complete() {
+        use crate::{node::create_node, subscriber::Subscriber};
+        let node = create_node().unwrap();
+        let topic = format!("Firefly/Test/DepthPixels/{}", std::process::id());
+        let subscriber = Subscriber::<DepthImageMessage>::with_topic(&node, &topic).unwrap();
+        let publisher = DepthImagePublisher::open(&node, &topic, None).unwrap();
+        for n in [IMAGE_SIZE - 1, IMAGE_SIZE + 1] {
+            assert!(
+                publisher
+                    .publish_pixels(1., 0, std::iter::repeat_n(1., n))
+                    .is_err()
+            );
+            assert!(subscriber.receive().unwrap().is_none());
+        }
+        let pixels = (0..IMAGE_SIZE).map(|i| f32::from_bits(i as u32));
+        publisher.publish_pixels(2., 0, pixels.clone()).unwrap();
+        let sample = subscriber.receive().unwrap().unwrap();
+        assert_eq!(
+            (sample.timestamp, sample.width, sample.height),
+            (2., IMAGE_WIDTH as u32, IMAGE_HEIGHT as u32)
+        );
+        assert!(
+            sample
+                .data
+                .iter()
+                .zip(pixels)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+        );
+    }
 
     #[test]
     fn down_image_has_cif_layout_and_independent_sensor_identity() {

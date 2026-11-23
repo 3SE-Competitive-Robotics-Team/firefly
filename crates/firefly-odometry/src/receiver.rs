@@ -33,11 +33,11 @@ pub struct OdometryHistory {
 }
 
 impl OdometryHistory {
-    /// 读取仍有效的有界里程计历史；停止或过期时返回空历史。
+    /// 在锁内查询有效历史。停止、过期或历史为空时返回 `None`。
     ///
     /// # Errors
     /// 接收线程失败或共享状态锁中毒。
-    pub fn snapshot(&self) -> Result<VecDeque<OdomMessage>> {
+    pub fn read<T>(&self, query: impl FnOnce(&VecDeque<OdomMessage>) -> T) -> Result<Option<T>> {
         let mut state = self
             .shared
             .lock()
@@ -46,9 +46,9 @@ impl OdometryHistory {
             return Err(error.clone());
         }
         if self.stop.load(Ordering::Relaxed) || state.input.current(Instant::now()).is_none() {
-            return Ok(VecDeque::new());
+            return Ok(None);
         }
-        Ok(state.history.clone())
+        Ok((!state.history.is_empty()).then(|| query(&state.history)))
     }
 }
 
@@ -202,7 +202,7 @@ mod tests {
             shared: Arc::new(Mutex::new(state)),
             stop: Arc::new(AtomicBool::new(false)),
         };
-        assert!(history.snapshot().unwrap().is_empty());
+        assert!(history.read(VecDeque::len).unwrap().is_none());
     }
 
     #[test]
@@ -223,7 +223,7 @@ mod tests {
             shared,
             stop: Arc::clone(&stop),
         };
-        assert_eq!(history.snapshot().unwrap().len(), 1);
+        assert_eq!(history.read(VecDeque::len).unwrap(), Some(1));
         let handle = std::thread::spawn(move || {
             let _termination = DropGuard::new(stop, |stop| {
                 stop.store(true, Ordering::Relaxed);
@@ -231,6 +231,6 @@ mod tests {
             panic!("receiver failure outside the state mutex");
         });
         assert!(handle.join().is_err());
-        assert!(history.snapshot().unwrap().is_empty());
+        assert!(history.read(VecDeque::len).unwrap().is_none());
     }
 }

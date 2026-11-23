@@ -57,11 +57,11 @@ impl Model {
         ))
     }
 
-    pub fn run<'a>(
-        &'a mut self,
+    pub fn run<T>(
+        &mut self,
         gray: &[u8],
-        cpu_output: &'a mut Vec<f32>,
-    ) -> Result<(usize, &'a [f32])> {
+        consume: impl FnOnce(usize, &[f32]) -> Result<T>,
+    ) -> Result<T> {
         match self {
             Self::Cpu { session, input } => {
                 for channel in input
@@ -86,12 +86,10 @@ impl Model {
                         format!("Unexpected ONNX depth shape {shape:?}"),
                     ));
                 }
-                cpu_output.clear();
-                cpu_output.extend_from_slice(data);
-                Ok((SIDE, cpu_output))
+                consume(SIDE, data)
             }
             #[cfg(target_os = "linux")]
-            Self::Npu(network) => Ok((SIDE / 4, network.run(gray)?)),
+            Self::Npu(network) => consume(SIDE / 4, network.run(gray)?),
         }
     }
 }

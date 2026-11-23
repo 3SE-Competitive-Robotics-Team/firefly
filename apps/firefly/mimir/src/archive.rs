@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use firefly_archive::Run;
 use firefly_error::Result;
-use firefly_pubsub::viz::{ScalarMessage, VizMessage, VoxelMessage, kind};
+use firefly_pubsub::viz::{ScalarMessage, VOXELS_MAX, kind};
 use firefly_pubsub::{navigation::NavigationMessage, odom::OdomMessage};
 use re_byte_size::SizeBytes as _;
 use re_chunk::{Chunk, PendingRow, TimeColumn, TimePoint, Timeline};
@@ -13,7 +13,9 @@ use crate::{
     config::Options,
     failure,
     frames::{Anchor, Frames},
-    invalid, schema,
+    invalid,
+    observation::{Geometry, GeometryData, VoxelChunk},
+    schema,
     segments::Segments,
     status::Status,
 };
@@ -174,7 +176,11 @@ impl Archive {
         if self.row_bytes + bytes > self.options.batch_bytes as u64 {
             self.flush_rows()?;
         }
-        let batch = self.rows.entry(name.to_owned()).or_default();
+        let batch = if let Some(batch) = self.rows.get_mut(name) {
+            batch
+        } else {
+            self.rows.entry(name.to_owned()).or_default()
+        };
         batch.values.push(row);
         batch.bytes += bytes;
         self.row_bytes += bytes;
@@ -375,26 +381,15 @@ impl Archive {
     /// Decode registered spatial payload kinds without retaining IPC loans.
     /// # Errors
     /// Invalid counts, geometry, timestamp, unsupported kind, or I/O failure.
-    #[allow(clippy::too_many_lines)] // One exhaustive wire-kind dispatcher.
-    pub fn geometry(&mut self, msg: &VizMessage) -> Result<()> {
-        let name = schema::entity(&msg.entity, msg.entity_len)?;
-        schema::spatial(name, msg.kind)?;
-        schema::timestamp(msg.timestamp)?;
+    pub fn geometry(&mut self, msg: &Geometry) -> Result<()> {
+        let name = &*msg.name;
         let stamp = Some(msg.timestamp);
-        match msg.kind {
-            kind::POSE => self.pose(name, msg.timestamp, msg.xyz, msg.quat_xyzw),
-            kind::SCALARS => self.scalar(
-                name,
-                msg.timestamp,
-                msg.scalars
-                    .get(..msg.scalar_count as usize)
-                    .ok_or_else(|| invalid("scalar count"))?,
-            ),
-            kind::LINE_STRIP => {
-                let points = msg
-                    .points
-                    .get(..msg.point_count as usize)
-                    .ok_or_else(|| invalid("line count"))?;
+        match &msg.data {
+            GeometryData::Pose { position, rotation } => {
+                self.pose(name, msg.timestamp, *position, *rotation)
+            }
+            GeometryData::Scalars(values) => self.scalar(name, msg.timestamp, values),
+            GeometryData::Line(points) => {
                 let points = points
                     .iter()
                     .map(|p| p.map(|v| v as f32))
@@ -405,17 +400,7 @@ impl Archive {
                     &rr::LineStrips3D::new([points]).with_colors([msg.color]),
                 )
             }
-            kind::KEYPOINTS_2D => {
-                let points = msg
-                    .points
-                    .get(..msg.point_count as usize)
-                    .ok_or_else(|| invalid("keypoint count"))?;
-                if msg.scalar_count != 3
-                    || msg.scalars[2] < f64::from(msg.point_count)
-                    || points.iter().flatten().any(|v| !v.is_finite())
-                {
-                    return Err(invalid("keypoint metadata"));
-                }
+            GeometryData::Keypoints { points, detected } => {
                 let pixels = points
                     .iter()
                     .map(|p| [p[0] as f32 + 0.5, p[1] as f32 + 0.5]);
@@ -440,38 +425,19 @@ impl Archive {
                         )
                         .with_component::<re_sdk_types::components::Scalar>(
                             "detected_count",
-                            [msg.scalars[2]],
+                            [*detected],
                         ),
                 )
             }
-            kind::ARROWS => {
-                let n = msg.arrow_count as usize;
-                let origins = msg
-                    .arrow_origins
-                    .get(..n)
-                    .ok_or_else(|| invalid("arrow count"))?;
-                let vectors = msg
-                    .arrow_vectors
-                    .get(..n)
-                    .ok_or_else(|| invalid("arrow count"))?;
-                self.spatial(
-                    name,
-                    msg.timestamp,
-                    &rr::Arrows3D::from_vectors(vectors.iter().map(|p| p.map(|v| v as f32)))
-                        .with_origins(origins.iter().map(|p| p.map(|v| v as f32)))
-                        .with_colors([msg.color]),
-                )
-            }
-            kind::BAR_CHART => self.write(
+            GeometryData::Arrows { origins, vectors } => self.spatial(
                 name,
-                stamp,
-                &rr::BarChart::new(
-                    msg.bins
-                        .get(..msg.bin_count as usize)
-                        .ok_or_else(|| invalid("histogram count"))?,
-                ),
+                msg.timestamp,
+                &rr::Arrows3D::from_vectors(vectors.iter().map(|p| p.map(|v| v as f32)))
+                    .with_origins(origins.iter().map(|p| p.map(|v| v as f32)))
+                    .with_colors([msg.color]),
             ),
-            kind::CLEAR => {
+            GeometryData::Bars(bins) => self.write(name, stamp, &rr::BarChart::new(&**bins)),
+            GeometryData::Clear => {
                 self.flush()?;
                 self.segments.clear(name);
                 self.voxels
@@ -480,7 +446,6 @@ impl Archive {
                     .retain(|key, _| key != name && !key.starts_with(&format!("{name}/")));
                 self.write(name, stamp, &rr::Clear::recursive())
             }
-            _ => Err(invalid(format!("unsupported geometry kind {}", msg.kind))),
         }
     }
 
@@ -604,26 +569,20 @@ impl Archive {
     /// Assemble every voxel chunk before publishing a complete map snapshot.
     /// # Errors
     /// Missing/reordered chunks, invalid geometry, missing baseline, or capacity/I/O failure.
-    pub fn voxel(&mut self, msg: &VoxelMessage) -> Result<()> {
-        let name = schema::entity(&msg.entity, msg.entity_len)?;
-        schema::spatial(name, msg.kind)?;
-        schema::timestamp(msg.timestamp)?;
+    pub fn voxel(&mut self, msg: &VoxelChunk) -> Result<()> {
+        let name = &*msg.name;
         self.register(name)?;
         if !matches!(
             msg.kind,
             kind::VOXELS | kind::VOXELS_ADD | kind::VOXELS_REMOVE
         ) || msg.chunk_count == 0
             || msg.chunk_index >= msg.chunk_count
-            || msg.chunk_count as usize > self.options.max_voxels.div_ceil(msg.voxels.len())
+            || msg.chunk_count as usize > self.options.max_voxels.div_ceil(VOXELS_MAX)
             || msg.voxel_size.iter().any(|v| !v.is_finite() || *v <= 0.)
             || msg.voxel_origin.iter().any(|v| !v.is_finite())
         {
             return Err(invalid("invalid voxel update metadata"));
         }
-        let incoming = msg
-            .voxels
-            .get(..msg.voxel_count as usize)
-            .ok_or_else(|| invalid("voxel count"))?;
         if msg.chunk_index == 0 {
             if self.pending_voxels.is_some() {
                 return Err(invalid("unfinished voxel update"));
@@ -653,7 +612,7 @@ impl Archive {
         {
             return Err(invalid("mismatched voxel chunk"));
         }
-        pending.append(incoming, self.options.max_voxels)?;
+        pending.append(&msg.voxels, self.options.max_voxels)?;
         if pending.next < pending.chunks {
             return Ok(());
         }
@@ -896,11 +855,13 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        let mut map = VoxelMessage::base(kind::VOXELS, 1., "plan/collision");
+        let mut map = firefly_pubsub::viz::VoxelMessage::base(kind::VOXELS, 1., "plan/collision");
         map.voxel_size = [0.1; 3];
         map.voxel_count = 1;
         map.voxels[0] = [2, 3, 5];
-        archive.voxel(&map).unwrap();
+        archive
+            .voxel(&VoxelChunk::from_message(&map).unwrap())
+            .unwrap();
         register_test_rig(&mut archive);
         let mut noise = 1_u32;
         for stamp in 0..20 {

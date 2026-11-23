@@ -2,14 +2,13 @@ use firefly_error::{Error, ErrorKind, Result};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use firefly_hal::pixel::{FrameFormat, gray_from_yuyv};
+use firefly_hal::pixel::FrameFormat;
 use firefly_pubsub::camera::FrameCadence;
 use firefly_pubsub::camera::{
     CAMERA_DOWN_TOPIC, CAMERA_LEFT_TOPIC, CAMERA_RIGHT_TOPIC, DOWN_HEIGHT, DOWN_SENSOR_ID,
-    DOWN_SIZE, DOWN_WIDTH, DownImageMessage, GrayImageMessage, IMAGE_HEIGHT, IMAGE_WIDTH,
+    DOWN_WIDTH, DownImagePublisher, GrayImagePublisher, IMAGE_HEIGHT, IMAGE_WIDTH,
 };
 use firefly_pubsub::node::create_node;
-use firefly_pubsub::publish::Publisher;
 use iceoryx2_bb_posix::clock::{ClockType, Time};
 use iceoryx2_bb_posix::signal::{FetchableSignal, SignalGuard, SignalHandler};
 use serde::Deserialize;
@@ -52,7 +51,7 @@ fn start_down(source: &DownSource) -> Result<DownWorker> {
     let worker = std::thread::spawn(move || {
         let result = (|| -> Result<()> {
             let node = create_node()?;
-            let publisher = Publisher::<DownImageMessage>::with_topic(&node, CAMERA_DOWN_TOPIC)?;
+            let publisher = DownImagePublisher::open(&node, CAMERA_DOWN_TOPIC, None)?;
             let _ = ready.send(());
             capture_down(&source, &publisher)?;
             Ok(())
@@ -78,7 +77,7 @@ fn start_down(source: &DownSource) -> Result<DownWorker> {
 }
 
 /// 下视采集流随进程持续运行，退出作用域时 Drop 执行 STREAMOFF。
-fn capture_down(source: &DownSource, publisher: &Publisher<DownImageMessage>) -> Result<()> {
+fn capture_down(source: &DownSource, publisher: &DownImagePublisher) -> Result<()> {
     let rate = source.rate_hz;
     let device = Device::with_path(&source.device).map_err(|e| {
         Error::from(e)
@@ -102,7 +101,6 @@ fn capture_down(source: &DownSource, publisher: &Publisher<DownImageMessage>) ->
     let mut stream = MmapStream::with_buffers(&device, Type::VideoCapture, source.buffers)?;
     stream.set_timeout(std::time::Duration::from_millis(100));
     let mut cadence = FrameCadence::default();
-    let mut gray = vec![0; DOWN_SIZE];
     let mut last_stamp = f64::NEG_INFINITY;
     while RUNNING.load(Ordering::Relaxed) {
         let (bytes, metadata) = match stream.next() {
@@ -144,29 +142,13 @@ fn capture_down(source: &DownSource, publisher: &Publisher<DownImageMessage>) ->
         if !cadence.admit(stamp, rate) {
             continue;
         }
-        for y in 0..DOWN_HEIGHT {
-            let row = &bytes[y * stride..y * stride + row_bytes];
-            let destination = &mut gray[y * DOWN_WIDTH..(y + 1) * DOWN_WIDTH];
-            if source.format == FrameFormat::Grey {
-                destination.copy_from_slice(row);
-            } else {
-                let written = gray_from_yuyv(row, destination);
-                if written != DOWN_WIDTH {
-                    return Err(Error::new(
-                        ErrorKind::InvalidData,
-                        "incomplete down YUYV row",
-                    ));
-                }
-            }
-        }
         last_stamp = stamp;
-        publisher.publish_with(|message| {
-            message.timestamp = stamp;
-            message.sensor_id = DOWN_SENSOR_ID;
-            message.width = DOWN_WIDTH as u32;
-            message.height = DOWN_HEIGHT as u32;
-            message.data.copy_from_slice(&gray);
-        })?;
+        let step = source.format.bytes_per_pixel();
+        let pixels = bytes
+            .chunks(stride)
+            .take(DOWN_HEIGHT)
+            .flat_map(|row| row[..row_bytes].iter().step_by(step).copied());
+        publisher.publish_pixels(stamp, DOWN_SENSOR_ID, pixels)?;
     }
     Ok(())
 }
@@ -279,8 +261,8 @@ pub fn run(config_path: &Path) -> Result<()> {
     let node = create_node()?;
     let log_ipc = firefly_observability::init_ipc(&node, "camera");
     let down = config.down.as_ref().map(start_down).transpose()?;
-    let left_pub = Publisher::<GrayImageMessage>::with_topic(&node, CAMERA_LEFT_TOPIC)?;
-    let right_pub = Publisher::<GrayImageMessage>::with_topic(&node, CAMERA_RIGHT_TOPIC)?;
+    let left_pub = GrayImagePublisher::open(&node, CAMERA_LEFT_TOPIC, None)?;
+    let right_pub = GrayImagePublisher::open(&node, CAMERA_RIGHT_TOPIC, None)?;
     log::info!(
         "相机源：左目 {} / 右目 {}（{width}×{height}）",
         config.left.device,
@@ -370,7 +352,7 @@ fn fourcc(format: FrameFormat) -> FourCC {
 /// 取一帧灰度并发布；帧长不足协商格式时丢帧并告警。
 fn pump_gray(
     stream: &mut MmapStream<'_>,
-    publisher: &Publisher<GrayImageMessage>,
+    publisher: &GrayImagePublisher,
     source: &Source,
     width: usize,
     height: usize,
@@ -401,30 +383,11 @@ fn pump_gray(
         );
         return Ok(());
     }
-    let pixels = width * height;
-    let mut written = pixels;
-    publisher.publish_with(|message| {
-        message.timestamp = stamp;
-        message.sensor_id = sensor_id;
-        message.width = width as u32;
-        message.height = height as u32;
-        match source.format {
-            FrameFormat::Grey => {
-                message.data[..pixels].copy_from_slice(&bytes[..pixels]);
-            }
-            FrameFormat::Yuyv => {
-                written = gray_from_yuyv(&bytes[..expected], &mut message.data[..pixels]);
-            }
-            FrameFormat::Z16 => {}
-        }
-    })?;
-    if written != pixels {
-        log::warn!(
-            "{} 只解出 {written}/{pixels} 个像素（{:?}），图像不完整",
-            source.device,
-            source.format
-        );
-    }
+    let gray = bytes[..expected]
+        .iter()
+        .step_by(source.format.bytes_per_pixel())
+        .copied();
+    publisher.publish_pixels(stamp, sensor_id, gray)?;
     Ok(())
 }
 

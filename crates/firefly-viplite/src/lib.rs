@@ -46,7 +46,6 @@ pub struct Network {
     prepared: bool,
     buffers: Vec<Buffer>,
     candidates: usize,
-    plane: Vec<u8>,
     lookup: [u8; 256],
     output: Vec<f32>,
     // The SDK may retain the NBG address until vip_destroy_network.
@@ -86,7 +85,6 @@ impl Network {
             prepared: false,
             buffers: Vec::new(),
             candidates: 0,
-            plane: vec![0; width * height],
             lookup: [0; 256],
             output: Vec::new(),
             model,
@@ -304,11 +302,13 @@ impl Network {
                 return Err(Error::new(ErrorKind::Io, "Failed to map NPU input"));
             }
             let dst = slice::from_raw_parts_mut(mapped, input.elements);
-            for (out, pixel) in self.plane.iter_mut().zip(gray) {
-                *out = self.lookup[*pixel as usize];
-            }
-            for channel in dst.chunks_exact_mut(gray.len()) {
-                channel.copy_from_slice(&self.plane);
+            let (red, rest) = dst.split_at_mut(gray.len());
+            let (green, blue) = rest.split_at_mut(gray.len());
+            for (((r, g), b), &pixel) in red.iter_mut().zip(green).zip(blue).zip(gray) {
+                let value = self.lookup[usize::from(pixel)];
+                *r = value;
+                *g = value;
+                *b = value;
             }
             check("vip_unmap_input", self.api.vip_unmap_buffer(input.handle))?;
             check(

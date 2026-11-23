@@ -11,10 +11,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use firefly_base::FrameId;
 use firefly_ego_map::{DepthImage, GridMap};
 use firefly_error::{Error, ErrorKind, Result};
-use firefly_odometry::OdometryHistory;
+use firefly_odometry::{OdometryHistory, PoseBracket};
 use firefly_pubsub::{
     camera::{DEPTH_TOPIC, DepthImageMessage, IMAGE_HEIGHT, IMAGE_WIDTH},
     node::create_node,
@@ -22,7 +21,7 @@ use firefly_pubsub::{
     subscriber::Subscriber,
     trace::TraceContext,
 };
-use nalgebra::{Isometry3, Translation3};
+use nalgebra::Isometry3;
 
 use crate::{
     config::DepthOptions,
@@ -153,22 +152,22 @@ fn run_mapping(
 
         let now = Instant::now();
         let mut changed = false;
-        if timer_due(&mut next_occupancy, OCCUPANCY_PERIOD, now) {
-            let poses = history.snapshot()?;
-            if !poses.is_empty() {
-                // The upstream timer treats times below one second as uninitialized.
-                let timer_time = 1. + now.duration_since(epoch).as_secs_f64();
-                if let Some((frame, pose)) =
-                    take_pair(&mut pending, &poses, now, fusion.options.max_pose_gap)
-                {
-                    let _span = frame.trace.continue_span("planner-depth-fusion");
-                    changed = fusion.integrate(frame, pose, timer_time)?;
-                } else {
-                    fusion.map.update_occupancy_callback(timer_time)?;
-                }
-                if fusion.map.odom_depth_timeout() {
-                    return Err(invalid("depth/pose fusion timed out; restart planner"));
-                }
+        if timer_due(&mut next_occupancy, OCCUPANCY_PERIOD, now)
+            && let Some(pair) = history
+                .read(|poses| take_pair(&mut pending, poses, now, fusion.options.max_pose_gap))?
+        {
+            // The upstream timer treats times below one second as uninitialized.
+            let timer_time = 1. + now.duration_since(epoch).as_secs_f64();
+            if let Some((frame, pose)) =
+                pair.and_then(|(frame, bracket)| Some((frame, bracket.pose()?)))
+            {
+                let _span = frame.trace.continue_span("planner-depth-fusion");
+                changed = fusion.integrate(frame, pose, timer_time)?;
+            } else {
+                fusion.map.update_occupancy_callback(timer_time)?;
+            }
+            if fusion.map.odom_depth_timeout() {
+                return Err(invalid("depth/pose fusion timed out; restart planner"));
             }
         }
         if fusion.options.fading_time > 0. && timer_due(&mut next_fading, FADING_PERIOD, now) {
@@ -207,7 +206,7 @@ fn take_pair(
     poses: &VecDeque<OdomMessage>,
     now: Instant,
     max_pose_gap: f64,
-) -> Option<(DepthFrame, Isometry3<f64>)> {
+) -> Option<(DepthFrame, PoseBracket)> {
     let first_stamp = poses.front()?.timestamp;
     let timeout = Duration::from_secs_f64(crate::MAP_TIMEOUT);
     while pending.front().is_some_and(|frame| {
@@ -220,7 +219,7 @@ fn take_pair(
         .enumerate()
         .rev()
         .find_map(|(index, frame)| {
-            interpolate_pose(poses, frame.timestamp, max_pose_gap).map(|pose| (index, pose))
+            PoseBracket::find(poses, frame.timestamp, max_pose_gap).map(|pose| (index, pose))
         })?;
     let frame = pending.remove(index)?;
     pending.drain(..index);
@@ -266,42 +265,6 @@ fn depth_units(metres: f32, scale: f64) -> u16 {
     (metres * scale as f32)
         .round_ties_even()
         .clamp(0., f32::from(u16::MAX)) as u16
-}
-
-fn interpolate_pose(
-    history: &VecDeque<OdomMessage>,
-    timestamp: f64,
-    max_gap: f64,
-) -> Option<Isometry3<f64>> {
-    let mut previous: Option<&OdomMessage> = None;
-    for message in history {
-        let stamp = message.timestamp;
-        if stamp == timestamp {
-            return Some(*message.body_pose(FrameId::ODOM).ok()?.isometry());
-        }
-        if stamp > timestamp {
-            let before = previous?;
-            let gap = stamp - before.timestamp;
-            if gap > max_gap || gap <= 0. {
-                return None;
-            }
-            let alpha = (timestamp - before.timestamp) / gap;
-            let a = before.body_pose(FrameId::ODOM).ok()?;
-            let b = message.body_pose(FrameId::ODOM).ok()?;
-            let position = a
-                .isometry()
-                .translation
-                .vector
-                .lerp(&b.isometry().translation.vector, alpha);
-            let rotation = a.isometry().rotation.slerp(&b.isometry().rotation, alpha);
-            return Some(Isometry3::from_parts(
-                Translation3::from(position),
-                rotation,
-            ));
-        }
-        previous = Some(message);
-    }
-    None
 }
 
 /// Numerical state is private to the mapping worker. Construct before opening IPC.
@@ -401,30 +364,29 @@ impl DepthFusion {
 
     fn build_collision(&self, bounds: Bounds) -> Result<firefly_map::CollisionSnapshot> {
         let resolution = self.map.resolution();
-        let mut cells = Vec::new();
-        let mut overflow = false;
-        self.map.visit_inflated_runs(|low, high| {
-            if cells.len() >= MAX_COLLISION_RUNS {
-                overflow = true;
-                return;
-            }
-            cells.push(Bounds {
-                min: low.map(|v| f64::from(v) * resolution),
-                max: high.map(|v| f64::from(v) * resolution),
+        let (low, high) = bounds.voxel_bounds(self.collision_origin, self.collision_resolution);
+        let mut count = 0;
+        let runs = self
+            .map
+            .inflated_runs()
+            .take(MAX_COLLISION_RUNS + 1)
+            .map(|(start, end)| {
+                count += 1;
+                Bounds {
+                    min: start.map(|v| f64::from(v) * resolution),
+                    max: end.map(|v| f64::from(v) * resolution),
+                }
+                .voxel_bounds(self.collision_origin, self.collision_resolution)
             });
-        });
-        if overflow {
+        let snapshot = firefly_map::CollisionSnapshot::from_runs(
+            low,
+            std::array::from_fn(|i| (high[i] - low[i]) as usize),
+            runs,
+        );
+        if count > MAX_COLLISION_RUNS {
             return Err(invalid("local collision snapshot capacity exceeded"));
         }
-        let (collision_low, collision_high) =
-            bounds.voxel_bounds(self.collision_origin, self.collision_resolution);
-        Ok(firefly_map::CollisionSnapshot::from_runs(
-            collision_low,
-            std::array::from_fn(|i| (collision_high[i] - collision_low[i]) as usize),
-            cells
-                .iter()
-                .map(|cell| cell.voxel_bounds(self.collision_origin, self.collision_resolution)),
-        ))
+        Ok(snapshot)
     }
 }
 

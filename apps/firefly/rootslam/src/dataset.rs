@@ -293,19 +293,22 @@ struct DatasetInputs {
 }
 impl DatasetInputs {
     fn read(dataset: &VioDatasetPtr, max_frames: usize) -> Result<Self> {
-        let (mut timestamps, gyro, accel) = {
+        let (timestamps, gyro, accel) = {
             let data = dataset
                 .lock()
                 .map_err(|_| error("Dataset mutex poisoned"))?;
+            let timestamps = data.image_timestamps();
+            let count = if max_frames == 0 {
+                timestamps.len()
+            } else {
+                max_frames.min(timestamps.len())
+            };
             (
-                data.image_timestamps().to_vec(),
+                timestamps[..count].to_vec(),
                 data.gyro_data().to_vec(),
                 data.accel_data().to_vec(),
             )
         };
-        if max_frames > 0 {
-            timestamps.truncate(max_frames);
-        }
         let requested_frames = timestamps.len();
         log::info!(
             "Dataset input: {requested_frames} camera frames, {} IMU samples",

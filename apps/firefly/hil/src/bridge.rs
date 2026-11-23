@@ -263,8 +263,8 @@ fn ipc_loop(
 ) -> Result<()> {
     let image_period = Duration::from_secs_f64(options.image_period_s);
     let mut image_deadline = Instant::now() + image_period;
-    let mut pending_left: Option<GrayImageMessage> = None;
-    let mut pending_right: Option<GrayImageMessage> = None;
+    let mut pending_left = None;
+    let mut pending_right = None;
     let mut pending_down = None;
     let mut down_deadline = Instant::now();
     let mut last_imu_stamp = f64::NAN;
@@ -307,22 +307,22 @@ fn ipc_loop(
         // 图像按周期节流：板端 VIO 处理不过来的帧在主机侧丢弃，不排队进 USB。
         // 双目必须成对发送，缺右目会让 VIO 无法初始化。
         while let Ok(Some(sample)) = down.left.receive() {
-            pending_left = Some(*sample.payload());
+            pending_left = Some(sample);
             activity = true;
         }
         while let Ok(Some(sample)) = down.right.receive() {
-            pending_right = Some(*sample.payload());
+            pending_right = Some(sample);
             activity = true;
         }
         while let Ok(Some(sample)) = down.down.receive() {
-            pending_down = Some(Box::new(*sample));
+            pending_down = Some(sample);
             activity = true;
         }
         if Instant::now() >= down_deadline {
             if let Some(image) = pending_down.take() {
                 let stamp = image.timestamp;
                 let sum = image.data.iter().map(|&pixel| u64::from(pixel)).sum();
-                if try_image(image_tx, ImageBatch::Down(image), &mut stats)? {
+                if try_image(image_tx, ImageBatch::Down(Box::new(*image)), &mut stats)? {
                     record_checksum(&mut stats, 3, stamp, sum);
                 }
             }
@@ -344,8 +344,8 @@ fn ipc_loop(
             } else if Instant::now() >= image_deadline {
                 let left = pending_left.take().expect("已检查非空");
                 let right = pending_right.take().expect("已检查非空");
-                enqueue_stereo(image_tx, &left, &right, &mut stats)?;
                 last_image_stamp = left.timestamp;
+                enqueue_stereo(image_tx, Box::new(*left), Box::new(*right), &mut stats)?;
                 image_deadline = next_image_deadline(image_deadline, Instant::now(), image_period);
             }
         }
@@ -394,11 +394,6 @@ fn ipc_loop(
 fn send_blocking(tx: &SyncSender<Message>, message: Message) -> Result<()> {
     tx.send(message)
         .map_err(|_| Error::new(ErrorKind::Unavailable, "USB 写线程已退出"))
-}
-
-fn record_image_checksum(stats: &mut StatsCounters, image: &GrayImageMessage) {
-    let sum: u64 = image.data.iter().map(|&pixel| u64::from(pixel)).sum();
-    record_checksum(stats, u8::from(image.sensor_id != 0), image.timestamp, sum);
 }
 
 fn record_checksum(stats: &mut StatsCounters, side: u8, stamp: f64, sum: u64) {
@@ -452,17 +447,21 @@ fn check_image_checksum(stats: &mut StatsCounters, scalar: &ScalarMessage) {
 
 fn enqueue_stereo(
     tx: &SyncSender<ImageBatch>,
-    left: &GrayImageMessage,
-    right: &GrayImageMessage,
+    left: Box<GrayImageMessage>,
+    right: Box<GrayImageMessage>,
     stats: &mut StatsCounters,
 ) -> Result<()> {
-    if try_image(
-        tx,
-        ImageBatch::Stereo(Box::new(*left), Box::new(*right)),
-        stats,
-    )? {
-        record_image_checksum(stats, left);
-        record_image_checksum(stats, right);
+    let checksums = [&left, &right].map(|image| {
+        (
+            u8::from(image.sensor_id != 0),
+            image.timestamp,
+            image.data.iter().map(|&pixel| u64::from(pixel)).sum(),
+        )
+    });
+    if try_image(tx, ImageBatch::Stereo(left, right), stats)? {
+        for (side, stamp, sum) in checksums {
+            record_checksum(stats, side, stamp, sum);
+        }
     }
     Ok(())
 }
@@ -673,8 +672,8 @@ mod tests {
             sensor_id: 1,
             ..Default::default()
         };
-        enqueue_stereo(&tx, &left, &right, &mut stats).unwrap();
-        enqueue_stereo(&tx, &left, &right, &mut stats).unwrap();
+        enqueue_stereo(&tx, Box::new(left), Box::new(right), &mut stats).unwrap();
+        enqueue_stereo(&tx, Box::new(left), Box::new(right), &mut stats).unwrap();
         assert_eq!(stats.dropped_images, 2);
         assert_eq!(
             stats.sent_images.len(),
@@ -687,10 +686,10 @@ mod tests {
         assert_eq!((left.sensor_id, right.sensor_id), (0, 1));
         assert_eq!(left.timestamp, right.timestamp);
         assert!(rx.try_recv().is_err());
-        enqueue_stereo(&tx, &left, &right, &mut stats).unwrap();
+        enqueue_stereo(&tx, left.clone(), right.clone(), &mut stats).unwrap();
         assert!(matches!(rx.try_recv(), Ok(ImageBatch::Stereo(..))));
         drop(rx);
-        assert!(enqueue_stereo(&tx, &left, &right, &mut stats).is_err());
+        assert!(enqueue_stereo(&tx, left, right, &mut stats).is_err());
     }
 
     #[test]

@@ -84,8 +84,10 @@ impl Worker {
             if sample.timestamp < session_start || !RUNNING.load(Ordering::Relaxed) {
                 break None;
             }
-            let history = self.odometry.history().snapshot()?;
-            if let Some(pose) = tracking::pose_at(&history, sample.timestamp) {
+            let bracket = self.odometry.history().read(|history| {
+                firefly_odometry::PoseBracket::find(history, sample.timestamp, 0.05)
+            })?;
+            if let Some(pose) = bracket.flatten().and_then(|pair| pair.pose()) {
                 break Some(pose);
             }
             if Instant::now() >= deadline {
