@@ -9,7 +9,7 @@ use super::types::*;
 
 pub use super::types::PositionControlStates;
 
-/// PX4 `vehicle_local_position_setpoint_s` 中由位置控制器填充的字段。
+/// 位置控制器输出的局部设定值。
 ///
 /// 位置 m，速度 m/s，加速度 m/s²（NED），推力按最大集体推力归一化；
 /// 偏航 rad，偏航角速度 rad/s。
@@ -81,8 +81,6 @@ impl PositionControl {
     const HOVER_THRUST_MIN: f32 = 0.1;
     const HOVER_THRUST_MAX: f32 = 0.9;
 
-    /// PX4 `PositionControl::empty_trajectory_setpoint`。
-    ///
     /// 所有设定值均为 NAN（不受控），本 crate 的消息结构不含时间戳。
     pub const EMPTY_TRAJECTORY_SETPOINT: TrajectorySetpoint = TrajectorySetpoint::EMPTY;
 
@@ -401,7 +399,7 @@ mod tests {
         );
     }
 
-    /// PX4 `Eulerf` 的 roll/pitch/yaw 提取（rad）。
+    /// 提取滚转角、俯仰角和偏航角（rad）。
     fn euler(q: Quatf) -> (f32, f32, f32) {
         let rotation = q.to_rotation_matrix();
         let m = rotation.matrix();
@@ -689,7 +687,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::similar_names)] // 与 PX4 测试中的 has_x/y/z_setpoint 命名保持一致
+    #[allow(clippy::similar_names)] // 每个布尔值对应一个坐标轴的设定值
     fn setpoint_validity_all_combinations() {
         let mut fixture = Fixture::new();
 

@@ -1,5 +1,5 @@
 //! 静止平台降落：对准、下降、目标锁存后的末段；由 FC 独占状态。
-use crate::{QuadState, px4::velocity_smoothing::VelocitySmoothing};
+use crate::{QuadState, multirotor::velocity_smoothing::VelocitySmoothing};
 use nalgebra::Vector3;
 use serde::Deserialize;
 

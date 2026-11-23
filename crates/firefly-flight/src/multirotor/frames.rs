@@ -1,5 +1,5 @@
 //! 产品：世界 `+Z` 上、机体 FLU（`+X` 前、`+Y` 左、`+Z` 上）。
-//! PX4：世界 NED、机体 FRD（`+X` 前、`+Y` 右、`+Z` 下）。
+//! 控制器：世界 NED、机体 FRD（`+X` 前、`+Y` 右、`+Z` 下）。
 //! 换轴矩阵 `F = diag(1, -1, -1)` 满足 `F⁻¹ = F`，向量均按 `F` 换基。
 //! 姿态按 `q_frd_ned = F · q_flu_world · F⁻¹` 共轭转换，航向 `yaw_ned = -yaw_flu`。
 
@@ -13,13 +13,13 @@ pub fn swap_yz(v: Vector3<f32>) -> Vector3<f32> {
     Vector3::new(v.x, -v.y, -v.z)
 }
 
-/// 产品世界系（Z 上）→ PX4 NED。
+/// 产品世界系（Z 上）→ NED。
 #[must_use]
 pub fn world_to_ned(v: Vector3<f32>) -> Vector3<f32> {
     swap_yz(v)
 }
 
-/// PX4 NED → 产品世界系（Z 上）。
+/// NED → 产品世界系（Z 上）。
 #[must_use]
 pub fn world_from_ned(v: Vector3<f32>) -> Vector3<f32> {
     swap_yz(v)
@@ -55,26 +55,26 @@ pub fn torque_from_frd(t: Vector3<f32>) -> Vector3<f32> {
     swap_yz(t)
 }
 
-/// 姿态：产品 body→world（FLU）→ PX4 body→NED（FRD）。
+/// 姿态：产品 body→world（FLU）→ body→NED（FRD）。
 #[must_use]
 pub fn attitude_to_frd_ned(q: Quatf) -> Quatf {
     let flip = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), std::f32::consts::PI);
     quat_canonical(flip * q * flip.inverse())
 }
 
-/// 姿态：PX4 body→NED（FRD）→ 产品 body→world（FLU）。
+/// 姿态：body→NED（FRD）→ 产品 body→world（FLU）。
 #[must_use]
 pub fn attitude_from_frd_ned(q: Quatf) -> Quatf {
     attitude_to_frd_ned(q)
 }
 
-/// 航向：产品世界系（绕 +Z 上）→ PX4 NED（绕 +Z 下）。
+/// 航向：产品世界系（绕 +Z 上）→ NED（绕 +Z 下）。
 #[must_use]
 pub fn yaw_to_ned(yaw: f32) -> f32 {
     wrap_pi(-yaw)
 }
 
-/// 航向：PX4 NED → 产品世界系。
+/// 航向：NED → 产品世界系。
 #[must_use]
 pub fn yaw_from_ned(yaw: f32) -> f32 {
     wrap_pi(-yaw)

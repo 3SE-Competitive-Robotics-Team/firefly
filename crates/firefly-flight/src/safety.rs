@@ -2,7 +2,7 @@
 
 use crate::fsm::Health;
 
-/// 解锁前逐项检查；顺序即首次失败的上报顺序（对照 PX4 `ArmingCheck`）。
+/// 解锁前逐项检查；顺序即首次失败的上报顺序。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum ArmingCheck {
@@ -75,10 +75,7 @@ impl ArmingCheck {
     }
 }
 
-/// 失效条件位掩码（对照 PX4 `FailsafeFlags.msg` 的产品子集）。
-///
-/// 只保留本产品能评估的项；PX4 的 RC/GCS/电池/地理围栏/GNSS/mission/失控检测
-/// 没有对应输入，故不设位，避免“永远为假”的假通过。
+/// 失效条件位掩码。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct FailsafeFlags(u32);
 
@@ -167,7 +164,7 @@ impl FailsafeFlags {
     }
 }
 
-/// 失效动作（对照 PX4 `FailsafeState` 的产品子集）。
+/// 失效动作。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FailsafeAction {
     #[default]

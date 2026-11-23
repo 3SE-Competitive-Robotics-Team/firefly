@@ -4,8 +4,8 @@ use nalgebra::Vector3;
 use serde::Deserialize;
 
 use crate::control::PositionSetpoint;
+use crate::multirotor::velocity_smoothing::VelocitySmoothing;
 use crate::precision::{PrecisionLanding, PrecisionParams};
-use crate::px4::velocity_smoothing::VelocitySmoothing;
 use crate::safety::{ArmingCheck, FailsafeAction, FailsafeFlags};
 use crate::state::QuadState;
 
@@ -179,7 +179,7 @@ pub struct FsmParams {
     #[serde(default = "d_land_complete_hold")]
     pub land_complete_hold: f32,
     /// 参考流失联超时（s）：超过即从 `Track` 回落 `Hold`。
-    /// 对照 `PX4` `COM_OF_LOSS_T`（默认 1.0 s）→ 回落 Position 模式。
+    /// 默认超时为 1.0 s。
     #[serde(default = "d_reference_timeout")]
     pub reference_timeout: f32,
 }
@@ -647,7 +647,7 @@ impl FlightFsm {
                     self.vertical_target(goal, self.params.land_descent_rate, false)
                 } else {
                     // Keep descending until low thrust and arrested motion confirm contact.
-                    // PX4 uses crawl speed above the vertical-motion threshold (factor 1.2).
+                    // Cap crawl speed at 1.2 times the vertical-motion threshold.
                     -self
                         .params
                         .land_descent_rate

@@ -4,7 +4,7 @@
 
 use super::types::*;
 
-/// 输出为归一化力矩指令 `[-1, 1]`（PX4 不在此处限幅，饱和由控制分配反馈）。
+/// 输出为归一化力矩指令 `[-1, 1]`（饱和由控制分配反馈）。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RateControl {
     /// 比例增益 [归一化力矩/(rad/s)]。
@@ -388,7 +388,7 @@ mod tests {
         );
         rate_control.set_integrator_limit(Vector3f::new(1.0, 1.0, 1.0));
 
-        // dt = ∞ 使积分步长非有限，PX4 保留上一周期的积分值
+        // dt = ∞ 使积分步长非有限，保留上一周期的积分值
         let _ = rate_control.update(
             Vector3f::zeros(),
             Vector3f::new(1.0, 1.0, 1.0),

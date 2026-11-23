@@ -1,6 +1,6 @@
 //! Desktop Matrix substitute. The simulated plant supplies the IMU and rotor geometry.
 use firefly_flight::{
-    Controller, Px4Params, QuadState, ipc::airframe_to_params, sticks::AngleDemand,
+    ControlParams, Controller, QuadState, ipc::airframe_to_params, sticks::AngleDemand,
 };
 use firefly_imu::{Estimator, Sample};
 use firefly_pubsub::{
@@ -35,7 +35,7 @@ struct Arguments {
 #[serde(deny_unknown_fields)]
 struct Config {
     #[serde(default)]
-    control: Px4Params,
+    control: ControlParams,
 }
 
 const PERIOD: Duration = Duration::from_millis(1);

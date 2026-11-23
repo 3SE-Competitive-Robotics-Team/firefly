@@ -1,4 +1,4 @@
-use firefly_flight::{FsmParams, Px4Params};
+use firefly_flight::{ControlParams, FsmParams};
 use serde::Deserialize;
 
 #[derive(Deserialize, Clone, Debug)]
@@ -12,9 +12,9 @@ pub struct PilotConfig {
     /// 控制环频率（Hz）。指令按此频率发布，被控对象取最新样本。
     #[serde(default = "d_rate_hz")]
     pub rate_hz: f64,
-    /// PX4 控制核心参数（角速度/姿态/位置环、分配 airmode）。
+    /// 多旋翼控制核心参数（角速度/姿态/位置环、分配 airmode）。
     #[serde(default)]
-    pub control: Px4Params,
+    pub control: ControlParams,
     /// 飞行状态机参数（起降高度/速率、参考失联超时、落地判据）。
     #[serde(default)]
     pub fsm: FsmParams,

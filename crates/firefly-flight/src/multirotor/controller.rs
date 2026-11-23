@@ -1,4 +1,4 @@
-//! 将产品 Z-up/FLU 状态接到 PX4 NED/FRD 控制链。
+//! 将产品的 Z-up/FLU 状态转换为多旋翼控制器使用的 NED/FRD 状态。
 //! 分配器的归一化执行器输出由机体推力上限换算为牛顿；核心约定见 [`super::types`]。
 
 use nalgebra::Vector3;
@@ -17,11 +17,11 @@ use super::types::{
     TrajectorySetpoint, VehicleAttitudeSetpoint, VehicleRatesSetpoint, VehicleTorqueSetpoint,
     constrain, radians,
 };
-use crate::params::Px4Params;
+use crate::params::ControlParams;
 use crate::{Airframe, G, PositionSetpoint, QuadParams, QuadState};
 
 pub struct Controller {
-    params: Px4Params,
+    params: ControlParams,
     rate: RateControl,
     attitude: AttitudeControl,
     position: PositionControl,
@@ -60,7 +60,7 @@ impl Controller {
     }
 
     #[must_use]
-    pub fn new(params: Px4Params) -> Self {
+    pub fn new(params: ControlParams) -> Self {
         let mut rate = RateControl::default();
         rate.set_pid_gains(
             Vector3::from(params.rate.k).component_mul(&Vector3::from(params.rate.p)),
@@ -121,7 +121,7 @@ impl Controller {
         }
         self.airframe_signature = Some(signature);
 
-        // PX4 FRD：位置 y/z 取反，旋向取反（+1 = FRD +z 反扭矩）。
+        // FRD 机体系：位置 y/z 取反，旋向取反（+1 = FRD +z 反扭矩）。
         let positions: Vec<[f32; 3]> = airframe
             .rotors
             .iter()
@@ -179,7 +179,7 @@ impl Controller {
         self.position.set_state(&PositionControlStates {
             position: world_to_ned(state.position),
             velocity: world_to_ned(state.velocity),
-            // PX4 的 D 项使用估计加速度；产品反馈没有独立加速度，取零（默认 D 增益很小）。
+            // D 项的加速度反馈在当前接口中取零。
             acceleration: Vector3::zeros(),
             yaw: yaw_of_frd_ned(q_frd_ned),
         });
@@ -287,7 +287,7 @@ impl Controller {
         };
 
         let rate_frd = rate_to_frd(state.ang_vel);
-        // 角加速度反馈缺省为零；PX4 用 `vehicle_angular_velocity.xyz_derivative`。
+        // 角加速度反馈缺省为零。
         let torque = self
             .rate
             .update(rate_frd, rates, Vector3::zeros(), dt, landed);
@@ -316,7 +316,7 @@ impl Controller {
         self.allocation.set_actuator_setpoint(actuator_sp);
         self.allocated_control = self.allocation.allocated_control();
 
-        // 下一 tick 的抗饱和反馈：未分配到的力矩（PX4 `control_allocator_status`）。
+        // 下一 tick 的抗饱和反馈：未分配到的力矩。
         let unallocated = control - self.allocated_control;
         let positive = [
             unallocated[AXIS_ROLL] > f32::EPSILON,

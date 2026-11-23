@@ -14,8 +14,8 @@ use fastrace::prelude::*;
 use firefly_flight::ipc::airframe_to_params;
 use firefly_flight::sticks::AngleDemand;
 use firefly_flight::{
-    Airframe, ArmingCheck, Command, Controller as Px4Controller, Event, FailsafeAction,
-    FailsafeFlags, FlightFsm, FsmParams, Health, PositionSetpoint, Px4Params, QuadParams,
+    Airframe, ArmingCheck, Command, ControlParams, Controller as MultirotorController, Event,
+    FailsafeAction, FailsafeFlags, FlightFsm, FsmParams, Health, PositionSetpoint, QuadParams,
     QuadState, Reject,
 };
 use firefly_pubsub::attitude::{ATTITUDE_TOPIC, AttitudeMessage};
@@ -377,7 +377,7 @@ struct Controller {
     last_thrust: Option<f32>,
     /// 最近一次控制使用的机体系角速度（FLU，rad/s），供诊断。
     ang_vel: Vector3<f32>,
-    px4: Px4Controller,
+    multirotor: MultirotorController,
     /// 解锁前首个失败项的位掩码（未解锁时有效）。
     arming_failed: u32,
     failsafe_flags: FailsafeFlags,
@@ -385,7 +385,7 @@ struct Controller {
 }
 
 impl Controller {
-    fn new(fsm: FsmParams, params: Px4Params) -> Self {
+    fn new(fsm: FsmParams, params: ControlParams) -> Self {
         Self {
             team: firefly_config::game::Team::Red.code(),
             landing_identity: None,
@@ -402,7 +402,7 @@ impl Controller {
             status_sequence: 0,
             last_thrust: None,
             ang_vel: Vector3::zeros(),
-            px4: Px4Controller::new(params),
+            multirotor: MultirotorController::new(params),
             arming_failed: 0,
             failsafe_flags: FailsafeFlags::default(),
             failsafe_action: FailsafeAction::None,
@@ -414,7 +414,7 @@ impl Controller {
         let mut health = health_of(inputs);
         health.landing_thrust_low = self
             .last_thrust
-            .is_some_and(|value| self.px4.low_collective(value));
+            .is_some_and(|value| self.multirotor.low_collective(value));
         let recovering = self.fsm.state() == firefly_flight::FlightState::AttitudeFallback
             && health.estimator_ready
             && health.odometry_alive
@@ -469,27 +469,28 @@ impl Controller {
         report_event(out.event);
         self.altitude = self.fsm.altitude_above_origin(&state);
         if !out.motors_enabled || !health.imu_alive || !self.attitude_ready {
-            self.px4.reset();
+            self.multirotor.reset();
             self.last_thrust = None;
             return None;
         }
         let (quad, airframe) = inputs.vehicle?;
-        self.px4.set_airframe(&quad, &airframe);
+        self.multirotor.set_airframe(&quad, &airframe);
         let (roll, pitch, yaw, thrust, feedforward) =
             if self.fsm.state() == firefly_flight::FlightState::AttitudeFallback {
-                (0., 0., self.standby_yaw, self.px4.hover_thrust, 0.)
+                (0., 0., self.standby_yaw, self.multirotor.hover_thrust, 0.)
             } else {
                 if !health.estimator_ready || !health.odometry_alive {
                     return None;
                 }
-                let target = self.px4.position_demand(
+                let target = self.multirotor.position_demand(
                     &state,
                     &out.setpoint,
                     dt,
                     self.fsm.ground_contact_candidate(&state),
                 );
                 let (roll, pitch, yaw) =
-                    firefly_flight::px4::frames::attitude_from_frd_ned(target.q_d).euler_angles();
+                    firefly_flight::multirotor::frames::attitude_from_frd_ned(target.q_d)
+                        .euler_angles();
                 (
                     roll,
                     pitch,
@@ -498,7 +499,7 @@ impl Controller {
                     -target.yaw_sp_move_rate,
                 )
             };
-        let error = firefly_flight::px4::frames::wrap_pi(yaw - state.yaw());
+        let error = firefly_flight::multirotor::frames::wrap_pi(yaw - state.yaw());
         self.last_thrust = Some(thrust);
         Some(AngleDemand {
             roll,
@@ -696,7 +697,7 @@ impl Controller {
             "fc/debug/tilt_deg",
             &[f64::from(tilt)],
         );
-        let vertical = self.px4.debug_vertical();
+        let vertical = self.multirotor.debug_vertical();
         publish_scalars(
             ports.viz_ref(),
             sim_time,
@@ -722,7 +723,7 @@ impl Controller {
             ports.viz_ref(),
             sim_time,
             "fc/debug/hover_thrust",
-            &[f64::from(self.px4.hover_thrust)],
+            &[f64::from(self.multirotor.hover_thrust)],
         );
         publish_scalars(
             ports.viz_ref(),
@@ -988,7 +989,7 @@ mod tests {
 
     #[test]
     fn newest_unknown_command_supersedes_pending_and_replayed_commands() {
-        let mut controller = Controller::new(FsmParams::default(), Px4Params::default());
+        let mut controller = Controller::new(FsmParams::default(), ControlParams::default());
         let mut inputs = sensor_inputs();
         for (sequence, kind) in [
             (1, command_kind::ARM),
@@ -1034,7 +1035,7 @@ mod tests {
 
     #[test]
     fn stale_grounded_estimator_cannot_start_hover_thrust() {
-        let mut controller = Controller::new(FsmParams::default(), Px4Params::default());
+        let mut controller = Controller::new(FsmParams::default(), ControlParams::default());
         let mut inputs = sensor_inputs();
         inputs.command = Some(ReceivedCommand {
             command: Ok(Command::Arm),
@@ -1119,7 +1120,7 @@ mod tests {
             }),
             ..Inputs::default()
         };
-        let mut controller = Controller::new(FsmParams::default(), Px4Params::default());
+        let mut controller = Controller::new(FsmParams::default(), ControlParams::default());
         assert!(controller.demand(&inputs, 0.001).is_none());
         assert!(!controller.attitude_ready);
         assert_eq!(
@@ -1131,8 +1132,8 @@ mod tests {
     #[test]
     fn changing_truth_cannot_change_demand() {
         let mut inputs = sensor_inputs();
-        let mut a = Controller::new(FsmParams::default(), Px4Params::default());
-        let mut b = Controller::new(FsmParams::default(), Px4Params::default());
+        let mut a = Controller::new(FsmParams::default(), ControlParams::default());
+        let mut b = Controller::new(FsmParams::default(), ControlParams::default());
         for _ in 0..1000 {
             a.demand(&inputs, 0.001);
             b.demand(&inputs, 0.001);
@@ -1170,7 +1171,7 @@ mod tests {
         assert_eq!(fallback.channels(), same.channels());
     }
     fn airborne(inputs: &mut Inputs) -> Controller {
-        let mut controller = Controller::new(FsmParams::default(), Px4Params::default());
+        let mut controller = Controller::new(FsmParams::default(), ControlParams::default());
         for (sequence, command) in [(1, Command::Arm), (2, Command::Takeoff { altitude: 1.0 })] {
             inputs.command = Some(ReceivedCommand {
                 sequence,
@@ -1250,7 +1251,7 @@ mod tests {
             command: Ok(Command::Arm),
             sequence: 1,
         });
-        let mut controller = Controller::new(FsmParams::default(), Px4Params::default());
+        let mut controller = Controller::new(FsmParams::default(), ControlParams::default());
         assert_eq!(
             controller
                 .demand(&inputs, 0.001)

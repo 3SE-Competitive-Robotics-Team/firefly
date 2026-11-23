@@ -50,14 +50,11 @@ impl Default for QuadParams {
     }
 }
 
-/// PX4 多旋翼控制核心的参数（与 `px4` 模块的类一一对应）。
-///
-/// 默认值取自 PX4-Autopilot `4dbd2e0` 的 `MC_*`/`MPC_*` 参数；产品包线
-/// （219g、32° 倾角、3m/s 水平速度）的差异在下方注释中标出。
-/// 归一化约定与 PX4 一致：力矩 `[-1,1]`、推力 `[0,1]`、执行器 `[0,1]`。
+/// 多旋翼角速度环、姿态环、位置环和控制分配参数。
+/// 力矩、推力和执行器指令的归一化范围分别为 `[-1,1]`、`[0,1]` 和 `[0,1]`。
 #[derive(Deserialize, Clone, Copy, Debug, Default)]
 #[serde(default, deny_unknown_fields)]
-pub struct Px4Params {
+pub struct ControlParams {
     pub rate: RateParams,
     pub attitude: AttitudeParams,
     pub position: PositionParams,
@@ -66,7 +63,7 @@ pub struct Px4Params {
     pub hover_thrust: Option<f32>,
 }
 
-impl Px4Params {
+impl ControlParams {
     /// # Errors
     /// Rejects non-finite gains and values outside their documented domains.
     pub fn validate(&self) -> firefly_error::Result<()> {
@@ -116,14 +113,14 @@ impl Px4Params {
         {
             return Err(firefly_error::Error::new(
                 firefly_error::ErrorKind::InvalidArgument,
-                "invalid PX4 control parameters",
+                "invalid multirotor control parameters",
             ));
         }
         Ok(())
     }
 }
 
-/// 角速度环参数（PX4 `MC_*RATE_*`）。
+/// 角速度环参数。
 #[derive(Deserialize, Clone, Copy, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct RateParams {
@@ -157,7 +154,7 @@ impl Default for RateParams {
     }
 }
 
-/// 姿态环参数（PX4 `MC_ROLL_P` / `MC_PITCH_P` / `MC_YAW_P` 等）。
+/// 姿态环参数。
 #[derive(Deserialize, Clone, Copy, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct AttitudeParams {
@@ -185,7 +182,7 @@ impl Default for AttitudeParams {
     }
 }
 
-/// 位置/速度环参数（PX4 `MPC_*`）。
+/// 位置/速度环参数。
 #[derive(Deserialize, Clone, Copy, Debug)]
 #[serde(default, deny_unknown_fields)]
 pub struct PositionParams {
@@ -220,11 +217,11 @@ impl Default for PositionParams {
             vel_p: [1.8, 1.8, 4.0],
             vel_i: [0.4, 0.4, 2.0],
             vel_d: [0.2, 0.2, 0.0],
-            // PX4 默认 12 m/s；产品任务包线 1.5 m/s，留一倍余量。
+            // 产品任务包线 1.5 m/s，留一倍余量。
             vel_max_horizontal: 3.0,
             vel_max_up: 3.0,
             vel_max_down: 1.5,
-            // PX4 默认 45°；产品机体限制 32°。
+            // 产品机体限制 32°。
             tilt_max_deg: 32.0,
             thrust_min: 0.12,
             thrust_max: 1.0,

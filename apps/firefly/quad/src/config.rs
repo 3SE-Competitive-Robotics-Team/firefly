@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use firefly_flight::{Airframe, Px4Params, QuadParams};
+use firefly_flight::{Airframe, ControlParams, QuadParams};
 use serde::Deserialize;
 
 #[derive(Resource, Deserialize, Clone, Debug)]
@@ -14,7 +14,7 @@ pub struct QuadConfig {
     #[serde(default)]
     pub airframe: Airframe,
     #[serde(default)]
-    pub control: Px4Params,
+    pub control: ControlParams,
     /// 手柄到姿态/推力的映射参数。
     #[serde(default)]
     pub manual: ManualParams,
@@ -55,7 +55,7 @@ impl Default for QuadConfig {
             start: [0.0, -2.0, 1.2],
             drone: QuadParams::default(),
             airframe: Airframe::default(),
-            control: Px4Params::default(),
+            control: ControlParams::default(),
             manual: ManualParams::default(),
         }
     }

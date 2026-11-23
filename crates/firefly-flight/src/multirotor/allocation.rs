@@ -6,21 +6,18 @@ use core::ops::{Deref, DerefMut};
 #[allow(clippy::wildcard_imports)]
 use super::types::*;
 
-/// 控制轴保留优先级（高 → 低）。对照 PX4 `ControlAllocationPseudoInverse::dropDependentAxes`
-/// 的 `kPriority = {THRUST_Z, ROLL, PITCH, THRUST_X, THRUST_Y, YAW}`，去掉本产品不存在的
-/// `thrust_x` / `thrust_y` 后为 4 轴版本。
+/// 控制轴保留优先级依次为垂直推力、滚转、俯仰和偏航。
 const AXIS_PRIORITY: [usize; NUM_AXES] = [AXIS_THRUST_Z, AXIS_ROLL, AXIS_PITCH, AXIS_YAW];
 
 /// 轴保留所需的最小独立度：单位轴行去掉高优先级轴投影后的范数平方（无量纲，约 5.7°）。
-/// 对照 PX4 `kMinAxisIndependence`，把伪逆沿该轴的增益限制在约 10 倍以内。
+/// 该阈值把伪逆沿该轴的增益限制在约 10 倍以内。
 const MIN_AXIS_INDEPENDENCE: f32 = 1e-2;
 
-/// 由 4 旋翼几何生成效能矩阵：PX4 `ActuatorEffectivenessRotors::computeEffectivenessMatrix`
-/// 在固定 X 四旋翼上的特化（旋翼轴恒为 FRD `(0, 0, -1)`，推力系数按单旋翼最大推力归一为 1）。
+/// 由固定 X 四旋翼的几何生成效能矩阵（旋翼轴恒为 FRD `(0, 0, -1)`，推力系数按单旋翼最大推力归一为 1）。
 ///
 /// - `rotor_positions`：旋翼位置，单位 m，FRD（x 前、y 右、z 下）；z 分量不影响力臂。
 /// - `rotor_spins`：旋翼转向，`+1` 表示该旋翼产生 FRD `+z` 反扭矩，`-1` 表示反向，无量纲。
-/// - `torque_coefficient`：反扭矩系数（PX4 `CA_ROTOR_KM`），单位 m（每单位归一化推力的力矩）。
+/// - `torque_coefficient`：反扭矩系数，单位 m（每单位归一化推力的力矩）。
 ///
 /// 行顺序为 `[roll, pitch, yaw, thrust_z]`：滚转/俯仰元为力臂 `-y_i` / `x_i`（单位 m），
 /// 偏航元为 `torque_coefficient * spin_i`（单位 m），推力元为 `-1`（推力沿 FRD `-z`）。
@@ -75,7 +72,7 @@ pub struct ControlAllocation {
     normalize_rpy: bool,
     /// 因不可独立实现而被清零的轴位掩码，位上移量等于轴索引。
     dropped_axes: u8,
-    /// 是否发生过执行器失效；失效后冻结归一化比例（PX4 `_had_actuator_failure`）。
+    /// 是否发生过执行器失效；失效后冻结归一化比例。
     had_actuator_failure: bool,
 }
 
@@ -105,7 +102,7 @@ impl ControlAllocation {
         }
     }
 
-    /// 设置效能矩阵、配平与线性化点（PX4 `setEffectivenessMatrix`）。
+    /// 设置效能矩阵、配平与线性化点。
     ///
     /// 线性化点先限幅再加到配平上，配平本身再限幅一次；`control_trim` 取未清零轴之前的
     /// 矩阵与限幅线性化点之积。`_update_normalization_scale` 在基类中不参与计算，仅由
@@ -223,7 +220,7 @@ impl ControlAllocation {
         }
     }
 
-    /// 把执行器指令限幅到 `[min, max]`（PX4 `clipActuatorSetpoint`）。
+    /// 把执行器指令限幅到 `[min, max]`。
     ///
     /// `max < min` 的执行器取配平值；NaN 因比较为假而原样保留（表示停桨）。
     #[must_use]
@@ -241,9 +238,9 @@ impl ControlAllocation {
         actuator
     }
 
-    /// 把执行器指令归一化到 `[0, 1]`：`(a - min) / (max - min)`（PX4 `normalizeActuatorSetpoint`）。
+    /// 把执行器指令归一化到 `[0, 1]`：`(a - min) / (max - min)`。
     ///
-    /// `min >= max` 的执行器改用配平值代入同一式子（PX4 原式，分母为 0 时结果为 NaN）。
+    /// `min >= max` 的执行器改用配平值代入同一式子（分母为 0 时结果为 NaN）。
     #[must_use]
     pub fn normalize_actuator_setpoint(&self, actuator: ActuatorVector) -> ActuatorVector {
         let mut actuator_normalized = ActuatorVector::zeros();
@@ -265,13 +262,13 @@ impl ControlAllocation {
         self.normalize_rpy = normalize_rpy;
     }
 
-    /// 被清零的轴位掩码，位上移量等于轴索引（PX4 `getDroppedAxes`）。
+    /// 被清零的轴位掩码，位上移量等于轴索引。
     #[must_use]
     pub fn dropped_axes(&self) -> u8 {
         self.dropped_axes
     }
 
-    /// 设置执行器失效标志（PX4 `setHadActuatorFailure`）。
+    /// 设置执行器失效标志。
     ///
     /// 失效后不再更新归一化比例，避免故障前后指令量纲跳变。
     pub fn set_had_actuator_failure(&mut self, failure: bool) {
@@ -285,7 +282,7 @@ impl ControlAllocation {
 
     pub fn update_parameters(&mut self) {}
 
-    /// 把掩码对应的执行器指令置为 NaN（PX4 `applyNanToActuators`）。
+    /// 把掩码对应的执行器指令置为 NaN。
     ///
     /// NaN 表示该电机停桨，由分配器与下游按无效值处理。
     pub fn apply_nan_to_actuators(&mut self, nan_actuators_mask: u32) {
@@ -297,14 +294,14 @@ impl ControlAllocation {
     }
 }
 
-/// PX4 `ControlAllocationPseudoInverse`：伪逆分配 + 列归一化。
+/// 伪逆分配 + 列归一化。
 #[derive(Clone, Copy, Debug)]
 pub struct ControlAllocationPseudoInverse {
     base: ControlAllocation,
     /// 混控矩阵（执行器 × 控制轴），`effectiveness` 的伪逆经归一化后的结果。
     mix: MixMatrix,
     mix_update_needed: bool,
-    /// 比例分配（不做列归一化），对照 PX4 `_metric_allocation`。
+    /// 比例分配（不做列归一化）。
     metric_allocation: bool,
     normalization_needs_update: bool,
 }
@@ -366,12 +363,12 @@ impl ControlAllocationPseudoInverse {
         }
     }
 
-    /// 比例分配开关：开启后跳过列归一化，比例保持不变（PX4 `setMetricAllocation`）。
+    /// 比例分配开关：开启后跳过列归一化，比例保持不变。
     pub fn set_metric_allocation(&mut self, metric_allocation: bool) {
         self.metric_allocation = metric_allocation;
     }
 
-    /// 分配控制指令到执行器（PX4 `ControlAllocationPseudoInverse::allocate`）。
+    /// 分配控制指令到执行器。
     ///
     /// 结果未限幅，调用方按需调用 [`ControlAllocation::clip_actuator_setpoint`]。
     pub fn allocate(&mut self) {
@@ -382,7 +379,7 @@ impl ControlAllocationPseudoInverse {
             self.base.actuator_trim + self.mix * (self.base.control_sp - self.base.control_trim);
     }
 
-    /// 按优先级 `[thrust_z, roll, pitch, yaw]` 清零（近）线性相关的轴行（PX4 `dropDependentAxes`）。
+    /// 按优先级 `[thrust_z, roll, pitch, yaw]` 清零（近）线性相关的轴行。
     ///
     /// 用已接受单位轴行 Gram 矩阵的 Cholesky 因子做 Gram-Schmidt：轴行去掉高优先级轴投影后
     /// 的范数平方小于 `MIN_AXIS_INDEPENDENCE` 时整行清零，避免求近奇异矩阵的伪逆。
@@ -438,7 +435,7 @@ impl ControlAllocationPseudoInverse {
         dropped
     }
 
-    /// 需要时重算混控矩阵与归一化比例（PX4 `updatePseudoInverse`）。
+    /// 需要时重算混控矩阵与归一化比例。
     fn update_pseudo_inverse(&mut self) {
         if !self.mix_update_needed {
             return;
@@ -458,7 +455,7 @@ impl ControlAllocationPseudoInverse {
         self.mix_update_needed = false;
     }
 
-    /// 计算每个控制轴的归一化比例（PX4 `updateControlAllocationMatrixScale`）。
+    /// 计算每个控制轴的归一化比例。
     fn update_control_allocation_matrix_scale(&mut self) {
         let scale = &mut self.base.control_allocation_scale;
 
@@ -521,7 +518,7 @@ impl ControlAllocationPseudoInverse {
         }
     }
 
-    /// 按归一化比例缩放混控矩阵列，并清零小元素（PX4 `normalizeControlAllocationMatrix`）。
+    /// 按归一化比例缩放混控矩阵列，并清零小元素。
     fn normalize_control_allocation_matrix(&mut self) {
         let scale = self.base.control_allocation_scale;
 
@@ -556,7 +553,7 @@ impl ControlAllocationPseudoInverse {
     }
 }
 
-/// 效能矩阵的 Moore-Penrose 伪逆，对应 PX4 `matrix::geninv`。
+/// 效能矩阵的 Moore-Penrose 伪逆。
 ///
 /// 4x4 非奇异时等于解析逆；秩亏时按 SVD 截断（阈值为 `max(m, n) * eps * σ_max`）。
 /// 输入含非有限值或 SVD 未收敛时返回零矩阵，分配路径因此不会 panic。
@@ -573,7 +570,7 @@ fn geninv(effectiveness: &EffectivenessMatrix) -> MixMatrix {
         .unwrap_or_else(|_| MixMatrix::zeros())
 }
 
-/// 混控模式，对应 PX4 参数 `MC_AIRMODE`：`0` 关闭、`1` 滚转/俯仰 airmode、`2` 全轴 airmode。
+/// 混控模式：`0` 关闭、`1` 滚转/俯仰 airmode、`2` 全轴 airmode。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Airmode {
     /// 不用增推解饱和：滚转/俯仰按需削减，偏航只在必要时减推力。
@@ -585,7 +582,7 @@ pub enum Airmode {
     RollPitchYaw,
 }
 
-/// PX4 `ControlAllocationSequentialDesaturation`：沿轴依次平移执行器指令以消除饱和。
+/// 沿轴依次平移执行器指令以消除饱和。
 #[derive(Clone, Copy, Debug)]
 pub struct ControlAllocationSequentialDesaturation {
     pseudo_inverse: ControlAllocationPseudoInverse,
@@ -613,7 +610,7 @@ impl DerefMut for ControlAllocationSequentialDesaturation {
 }
 
 impl ControlAllocationSequentialDesaturation {
-    /// 偏航在饱和时仍保留的最小权限比例，无量纲（PX4 `MINIMUM_YAW_MARGIN`）。
+    /// 偏航在饱和时仍保留的最小权限比例，无量纲。
     pub const MINIMUM_YAW_MARGIN: f32 = 0.15;
 
     #[must_use]
@@ -628,7 +625,7 @@ impl ControlAllocationSequentialDesaturation {
         self.airmode = airmode;
     }
 
-    /// 分配控制指令到执行器（PX4 `ControlAllocationSequentialDesaturation::allocate`）。
+    /// 分配控制指令到执行器。
     ///
     /// 结果未限幅；饱和已由解饱和过程处理。
     pub fn allocate(&mut self) {
@@ -643,8 +640,7 @@ impl ControlAllocationSequentialDesaturation {
         }
     }
 
-    /// 沿 `desaturation_vector` 平移执行器指令，把饱和量降到最低
-    /// （PX4 `desaturateActuators`）。
+    /// 沿 `desaturation_vector` 平移执行器指令，把饱和量降到最低。
     ///
     /// 平移分两步：先消除最严重的饱和，再用半步增益平衡上下界。`increase_only` 为真时
     /// 只允许增推方向。
@@ -671,7 +667,7 @@ impl ControlAllocationSequentialDesaturation {
         }
     }
 
-    /// 使最严重饱和回到边界所需的增益（PX4 `computeDesaturationGain`）。
+    /// 使最严重饱和回到边界所需的增益。
     ///
     /// 忽略 `|desaturation_vector| < 0.2` 的执行器，避免用弱效能执行器产生过大的增益。
     fn compute_desaturation_gain(
@@ -715,7 +711,7 @@ impl ControlAllocationSequentialDesaturation {
         k_min + k_max
     }
 
-    /// 滚转/俯仰 airmode 混控：偏航单独叠加（PX4 `mixAirmodeRP`）。
+    /// 滚转/俯仰 airmode 混控：偏航单独叠加。
     fn mix_airmode_rp(&mut self) {
         let mut actuator_sp = ActuatorVector::zeros();
         let mut thrust_z = ActuatorVector::zeros();
@@ -737,7 +733,7 @@ impl ControlAllocationSequentialDesaturation {
         self.mix_yaw();
     }
 
-    /// 全轴 airmode 混控：先整体混控，再按推力、偏航顺序解饱和（PX4 `mixAirmodeRPY`）。
+    /// 全轴 airmode 混控：先整体混控，再按推力、偏航顺序解饱和。
     fn mix_airmode_rpy(&mut self) {
         let mut actuator_sp = ActuatorVector::zeros();
         let mut thrust_z = ActuatorVector::zeros();
@@ -764,8 +760,7 @@ impl ControlAllocationSequentialDesaturation {
         self.base.actuator_sp = actuator_sp;
     }
 
-    /// 关闭 airmode 的混控：绝不增推解饱和，按推力、滚转、俯仰顺序削减
-    /// （PX4 `mixAirmodeDisabled`）。
+    /// 关闭 airmode 的混控：绝不增推解饱和，按推力、滚转、俯仰顺序削减。
     fn mix_airmode_disabled(&mut self) {
         let mut actuator_sp = ActuatorVector::zeros();
         let mut thrust_z = ActuatorVector::zeros();
@@ -794,7 +789,7 @@ impl ControlAllocationSequentialDesaturation {
         self.mix_yaw();
     }
 
-    /// 在已含滚转/俯仰/推力的执行器指令上叠加偏航并解饱和（PX4 `mixYaw`）。
+    /// 在已含滚转/俯仰/推力的执行器指令上叠加偏航并解饱和。
     ///
     /// 上限临时放宽 [`Self::MINIMUM_YAW_MARGIN`]，让满推力时仍保留部分偏航权限；
     /// 之后只允许减推力，不允许增推。
@@ -826,7 +821,7 @@ impl ControlAllocationSequentialDesaturation {
 mod tests {
     use super::*;
 
-    /// PX4 `ControlAllocationSequentialDesaturationTest` 的 `QuadX` 几何：
+    /// X 型四旋翼的测试几何：
     /// 旋翼位置 `(±1, ±1, 0)` m，反扭矩系数 `±1` m（顺时针编号）。
     fn quad_x_effectiveness() -> EffectivenessMatrix {
         effectiveness_from_rotors(
@@ -1167,7 +1162,7 @@ mod tests {
         assert_actuator_equals(outputs, [1.0, 0.0, 0.0, 1.0], "大推力俯仰");
     }
 
-    /// PX4 `PreviousMixingTestsNoAirmode` 的输入/输出表：
+    /// 关闭 airmode 时的混控输入/输出表：
     /// `(roll, pitch, yaw, thrust_z)` → 4 个执行器指令。
     const PREVIOUS_MIXING_AIRMODE_DISABLED: [(f32, f32, f32, f32, [f32; 4]); 65] = [
         (0.000, 0.000, 0.000, -0.000, [0.0, 0.0, 0.0, 0.0]),

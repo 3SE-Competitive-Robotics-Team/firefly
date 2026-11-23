@@ -299,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn nan_helpers_match_px4() {
+    fn nan_components_are_treated_as_unset() {
         let mut value = 1.0;
         add_if_not_nan(&mut value, 2.0);
         assert_close(value, 3.0, 1e-6);

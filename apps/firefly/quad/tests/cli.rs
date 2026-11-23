@@ -30,6 +30,8 @@ fn explicit_invalid_config_is_rejected_before_window_creation() {
         .output()
         .unwrap();
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid PX4 control parameters"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("invalid multirotor control parameters")
+    );
     std::fs::remove_dir_all(directory).unwrap();
 }

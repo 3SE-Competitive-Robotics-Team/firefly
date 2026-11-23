@@ -16,19 +16,18 @@ pub fn correct_tilt_setpoint_for_yaw_error(q_sp_tilt: &mut Quatf, q_att: Quatf, 
     let z_unit = Vector3f::z();
 
     let att_z = quat_dcm_z(q_att);
-    let q_tilt = quat_from_two_vectors_px4(z_unit, att_z);
+    let q_tilt = shortest_arc_quat(z_unit, att_z);
     let q_yaw = q_tilt.inverse() * q_att; // 不是欧拉偏航角
 
     // 求使 q_yaw * q_tilt_new = q_sp_yaw * q_sp_rp_compensated 的倾斜方向
     let q_sp_rp_compensated = q_sp_yaw.inverse() * q_yaw * *q_sp_tilt;
 
     let att_sp_z = quat_dcm_z(q_sp_rp_compensated);
-    *q_sp_tilt = quat_from_two_vectors_px4(z_unit, att_sp_z);
+    *q_sp_tilt = shortest_arc_quat(z_unit, att_sp_z);
 }
 
-/// PX4 `matrix::Quaternion(const Vector3 &src, const Vector3 &dst)`：`src` 到 `dst` 的
-/// 最短旋转；反向平行时返回绕正交轴的 180° 旋转，而不是单位四元数。
-fn quat_from_two_vectors_px4(src: Vector3f, dst: Vector3f) -> Quatf {
+/// 从 `src` 转到 `dst` 的最短旋转。反向平行时，取与源向量最不平行的坐标轴叉乘得到旋转轴。
+pub(super) fn shortest_arc_quat(src: Vector3f, dst: Vector3f) -> Quatf {
     let mut cr = src.cross(&dst);
     let dt = src.dot(&dst);
 
@@ -87,7 +86,7 @@ mod tests {
 
         let q_yaw_att = {
             let att_z = quat_dcm_z(q_att);
-            let q_tilt = quat_from_two_vectors_px4(Vector3f::z(), att_z);
+            let q_tilt = shortest_arc_quat(Vector3f::z(), att_z);
             q_tilt.inverse() * q_att
         };
         let expected = q_sp_yaw.inverse() * q_yaw_att * q_sp_tilt;
@@ -107,7 +106,7 @@ mod tests {
 
         assert!(corrected.scalar().is_finite());
         assert!(corrected.vector().iter().all(|v| v.is_finite()));
-        // 180° 姿态下 PX4 选取绕 +x 的 180° 倾斜，补偿后回到竖直推力方向
+        // 180° 姿态下选取绕 +x 的 180° 倾斜，补偿后回到竖直推力方向
         assert_z_axis_near(corrected, Vector3f::z(), 1e-6);
     }
 }

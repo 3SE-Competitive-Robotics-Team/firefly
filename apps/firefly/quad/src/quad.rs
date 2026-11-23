@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use firefly_flight::{Controller, G, Px4Params, QuadState, integrate, yaw_of};
+use firefly_flight::{ControlParams, Controller, G, QuadState, integrate, yaw_of};
 use nalgebra::{UnitQuaternion, Vector3};
 
 use crate::config::QuadConfig;
@@ -16,7 +16,7 @@ pub struct Quad {
 
 impl Quad {
     #[must_use]
-    pub fn new(params: Px4Params) -> Self {
+    pub fn new(params: ControlParams) -> Self {
         Self {
             state: QuadState::default(),
             motors: [0.0; 4],
@@ -60,7 +60,7 @@ pub fn dynamics(
     drone: Single<(&mut Quad, &mut Transform)>,
 ) {
     let (mut quad, mut transform) = drone.into_inner();
-    // 固定 240Hz 步长；PX4 内环参数按这个 dt 配置。
+    // 固定 240Hz 步长；姿态和角速度环参数按这个 dt 配置。
     let dt = time.delta_secs();
 
     if input.reset {

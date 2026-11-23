@@ -1,6 +1,6 @@
 use firefly_flight::{
-    Airframe, Command, Controller, FlightFsm, FlightState, FsmParams, G, Health, PositionSetpoint,
-    Px4Params, QuadParams, QuadState, Wrench, integrate,
+    Airframe, Command, ControlParams, Controller, FlightFsm, FlightState, FsmParams, G, Health,
+    PositionSetpoint, QuadParams, QuadState, Wrench, integrate,
 };
 use nalgebra::{UnitQuaternion, Vector3};
 
@@ -15,7 +15,7 @@ fn plant() -> QuadParams {
 }
 
 fn controller() -> Controller {
-    Controller::new(Px4Params::default())
+    Controller::new(ControlParams::default())
 }
 
 fn tick(

@@ -114,7 +114,7 @@ impl VelocitySmoothing {
         }
     }
 
-    /// 一步更新（PX4 `ManualVelocitySmoothingZ::update` 的顺序：先推进、再算下一段时长）。
+    /// 先推进当前轨迹，再计算下一段时长。
     pub fn update(&mut self, dt: f32, vel_setpoint: f32) {
         self.update_traj(dt, 1.0);
         self.update_durations(vel_setpoint);
@@ -360,7 +360,7 @@ fn compute_t3(t1: f32, a0: f32, jerk_max: f32) -> f32 {
 }
 
 #[cfg(test)]
-#[allow(clippy::float_cmp)] // PX4 测试用精确零值断言轨迹静止
+#[allow(clippy::float_cmp)] // 用精确零值断言轨迹静止
 mod tests {
     use super::*;
 
@@ -467,7 +467,7 @@ mod tests {
         assert!((trajectories[0].t1() - trajectories[1].t1()).abs() < 1e-6);
         assert!((trajectories[0].t2() - trajectories[1].t2()).abs() < 1e-6);
         assert!((trajectories[0].t3() - trajectories[1].t3()).abs() < 1e-6);
-        // 零速度/零设定值的轴在 PX4 源码里 `jerk_max_T1 == 0`，三段时长为零；
+        // 零速度/零设定值的轴满足 `jerk_max_T1 == 0`，三段时长为零；
         // `timeSynchronization` 不会给它分配常速段，因此这里只断言同步轴（XY）相位一致。
         let _ = &trajectories[2];
     }

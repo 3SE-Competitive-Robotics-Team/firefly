@@ -1,4 +1,4 @@
-//! PX4 控制核心；坐标、单位与归一化约定见 [`types`]，产品边界见 [`controller`]。
+//! 多旋翼控制核心；坐标、单位与归一化约定见 [`types`]，产品边界见 [`controller`]。
 
 pub mod allocation;
 pub mod attitude_control;

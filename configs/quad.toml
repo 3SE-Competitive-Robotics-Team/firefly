@@ -1,5 +1,5 @@
 # 微无人机第三人称飞行（apps/firefly/quad）：独立 6-DOF 四旋翼，不接 IPC / VIO。
-# 机体、旋翼布局与 PX4 控制参数见 crates/firefly-flight。
+# 机体、旋翼布局与 多旋翼控制参数见 crates/firefly-flight。
 
 [control.rate]
 # 240Hz 定步长 + 显式积分：内环比 1kHz 飞控进程保守，避免步长引入振荡。

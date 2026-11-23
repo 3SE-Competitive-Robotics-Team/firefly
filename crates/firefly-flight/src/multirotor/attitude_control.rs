@@ -1,6 +1,6 @@
 //! 二阶临界阻尼参考模型 → 姿态 P 控制 → 角速度前馈。
 //! 姿态输入为 FRD→NED 四元数，输出为 FRD 机体系角速率（rad/s）。
-//! 私有四元数助手保留 PX4 按首个非零分量定符号、反向平行时取正交轴 180° 旋转的约定。
+//! 四元数以首个显著非零分量定符号，反向平行的向量绕正交轴旋转 180°。
 
 #![allow(
     clippy::assign_op_pattern,
@@ -10,6 +10,7 @@
 
 use nalgebra::Quaternion;
 
+use super::attitude_control_math::shortest_arc_quat;
 use super::types::*;
 
 #[derive(Clone, Copy, Debug)]
@@ -131,7 +132,7 @@ impl AttitudeControl {
 
         let e_z = quat_dcm_z(q);
         let e_z_d = quat_dcm_z(qd);
-        let mut qd_red = quat_from_two_vectors_px4(e_z, e_z_d);
+        let mut qd_red = shortest_arc_quat(e_z, e_z_d);
 
         if quat_imag(qd_red)[0].abs() > (1.0 - 1e-5) || quat_imag(qd_red)[1].abs() > (1.0 - 1e-5) {
             qd_red = qd;
@@ -140,7 +141,7 @@ impl AttitudeControl {
         }
 
         // qd = qd_red * qd_dyaw，其中 qd_dyaw = (cos(Δψ/2), 0, 0, sin(Δψ/2))
-        let qd_dyaw = quat_canonical_px4(qd_red.inverse() * qd);
+        let qd_dyaw = quat_canonical_first_nonzero(qd_red.inverse() * qd);
         let qd_dyaw_w = constrain(qd_dyaw.scalar(), -1.0, 1.0);
         let qd_dyaw_z = constrain(qd_dyaw.vector()[2], -1.0, 1.0);
 
@@ -152,7 +153,7 @@ impl AttitudeControl {
                 (self._yaw_w * qd_dyaw_z.asin()).sin(),
             ));
 
-        let qe = quat_canonical_px4(q.inverse() * qd);
+        let qe = quat_canonical_first_nonzero(q.inverse() * qd);
 
         let eq = 2.0 * quat_imag(qe);
 
@@ -207,7 +208,7 @@ impl AttitudeControl {
             Vector3f::zeros()
         };
 
-        let q_err = quat_canonical_px4(q_ref_inv * qd);
+        let q_err = quat_canonical_first_nonzero(q_ref_inv * qd);
         let e = 2.0 * quat_imag(q_err);
 
         let w_dt = self._omega_n * dt;
@@ -232,8 +233,8 @@ impl AttitudeControl {
     }
 }
 
-/// PX4 `Quatf::canonical()`：用首个非零分量的符号选定四元数表示。
-fn quat_canonical_px4(q: Quatf) -> Quatf {
+/// 按 w、x、y、z 的顺序，让首个绝对值大于单精度 epsilon 的分量为正。
+fn quat_canonical_first_nonzero(q: Quatf) -> Quatf {
     for component in [q.scalar(), q.vector()[0], q.vector()[1], q.vector()[2]] {
         if component.abs() > f32::EPSILON {
             return if component < 0.0 {
@@ -245,39 +246,6 @@ fn quat_canonical_px4(q: Quatf) -> Quatf {
     }
 
     q
-}
-
-/// PX4 `matrix::Quaternion(const Vector3 &src, const Vector3 &dst)`：
-/// `src` 到 `dst` 的最短旋转。
-///
-/// 反向平行（`|src × dst| < 1e-5` 且点积为负）时，PX4 选 `|src|` 最小分量对应的坐标轴，
-/// 再与 `src` 叉乘得到 180° 旋转轴，使 `update` 的“推力完全反向”分支可被识别。
-fn quat_from_two_vectors_px4(src: Vector3f, dst: Vector3f) -> Quatf {
-    let mut cr = src.cross(&dst);
-    let dt = src.dot(&dst);
-
-    let w = if cr.norm() < 1e-5 && dt < 0.0 {
-        // 180° 反向：按 |src| 的最小分量选一个与 src 不平行的轴
-        let abs = src.abs();
-        let axis = if abs[0] < abs[1] {
-            if abs[0] < abs[2] {
-                Vector3f::x()
-            } else {
-                Vector3f::z()
-            }
-        } else if abs[1] < abs[2] {
-            Vector3f::y()
-        } else {
-            Vector3f::z()
-        };
-
-        cr = src.cross(&axis);
-        0.0
-    } else {
-        dt + (src.norm_squared() * dst.norm_squared()).sqrt()
-    };
-
-    Quatf::from_quaternion(Quaternion::new(w, cr[0], cr[1], cr[2]))
 }
 
 #[cfg(test)]

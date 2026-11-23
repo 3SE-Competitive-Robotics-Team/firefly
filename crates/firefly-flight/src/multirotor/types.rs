@@ -1,4 +1,4 @@
-//! Shared types and math conventions for the PX4 control core.
+//! Shared types and math conventions for multirotor control.
 //!
 //! **NED world frame / FRD body frame** conventions. Conversion to the
 //! product's Z-up / FLU frames happens only at the outer boundary.
@@ -28,7 +28,7 @@ pub type EffectivenessMatrix = SMatrix<f32, NUM_AXES, NUM_ACTUATORS>;
 pub type MixMatrix = SMatrix<f32, NUM_ACTUATORS, NUM_AXES>;
 pub type Quatf = UnitQuaternion<f32>;
 
-/// Standard gravity (m/s²), PX4's `CONSTANTS_ONE_G`.
+/// Standard gravity (m/s²).
 pub const CONSTANTS_ONE_G: f32 = 9.80665;
 
 #[must_use]
@@ -79,7 +79,7 @@ impl Vector3fExt for Vector3f {
     }
 }
 
-/// PX4 `Quatf` helpers. PX4 and nalgebra both use Hamilton convention.
+/// Canonicalize a Hamilton quaternion to a nonnegative scalar part.
 #[must_use]
 pub fn quat_canonical(q: Quatf) -> Quatf {
     if q.scalar() < 0.0 {
@@ -89,13 +89,13 @@ pub fn quat_canonical(q: Quatf) -> Quatf {
     }
 }
 
-/// Vector part of the quaternion (`x, y, z`), PX4 `Quatf::imag()`.
+/// Vector part of the quaternion (`x, y, z`).
 #[must_use]
 pub fn quat_imag(q: Quatf) -> Vector3f {
     q.vector().into_owned()
 }
 
-/// PX4 `Quatf::dcm_z()`: body +z axis expressed in the world frame.
+/// Body +z axis expressed in the world frame.
 #[must_use]
 pub fn quat_dcm_z(q: Quatf) -> Vector3f {
     q * Vector3::z()
@@ -106,13 +106,13 @@ pub fn quat_rotate(q: Quatf, v: Vector3f) -> Vector3f {
     q * v
 }
 
-/// PX4 `Quatf(v0, v1)`: shortest rotation taking `v0` to `v1`.
+/// Shortest rotation taking `v0` to `v1`.
 #[must_use]
 pub fn quat_from_two_vectors(v0: Vector3f, v1: Vector3f) -> Quatf {
     UnitQuaternion::rotation_between(&v0, &v1).unwrap_or_else(UnitQuaternion::identity)
 }
 
-/// PX4 `Quatf(AxisAnglef(v))`: rotation vector (axis × angle).
+/// Rotation vector (axis × angle).
 #[must_use]
 pub fn quat_from_rotation_vector(v: Vector3f) -> Quatf {
     UnitQuaternion::from_scaled_axis(v)
@@ -204,7 +204,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn quaternion_helpers_match_px4_semantics() {
+    fn quaternion_helpers_preserve_rotation_and_axis_conventions() {
         let q = UnitQuaternion::from_scaled_axis(Vector3::new(0.0, 0.0, 4.0));
         let c = quat_canonical(q);
         assert!(c.scalar() >= 0.0);
