@@ -28,7 +28,6 @@ impl Rows {
 pub struct Pixels {
     gray: Vec<u8>,
     square: Vec<f32>,
-    restored: Vec<f32>,
     input_rows: Vec<Rows>,
     head_axis: Vec<Rows>,
     output_rows: Vec<Rows>,
@@ -44,7 +43,6 @@ impl Pixels {
         Self {
             gray: vec![0; SIDE * SIDE],
             square: vec![0.; SIDE * SIDE],
-            restored: vec![0.; IMAGE_SIZE],
             input_rows: (0..SIDE)
                 .map(|i| {
                     Rows::new(
@@ -77,7 +75,7 @@ impl Pixels {
     }
 
     /// Restore the compact NPU head to the ONNX output grid, then to camera pixels.
-    pub fn restore(&mut self, side: usize, values: &[f32]) -> &[f32] {
+    pub fn restore_into(&mut self, side: usize, values: &[f32], output: &mut [f32; IMAGE_SIZE]) {
         let full = if side == SIDE {
             values
         } else {
@@ -96,8 +94,7 @@ impl Pixels {
             }
             &self.square
         };
-        for (row, &y) in self
-            .restored
+        for (row, &y) in output
             .as_chunks_mut::<IMAGE_WIDTH>()
             .0
             .iter_mut()
@@ -111,7 +108,6 @@ impl Pixels {
                 *out = y.sample(a, b);
             }
         }
-        &self.restored
     }
 }
 
@@ -126,7 +122,8 @@ mod tests {
             let plane: Vec<_> = (0..side * side)
                 .map(|i| 1. + (i / side + i % side) as f32 / (side - 1) as f32)
                 .collect();
-            let restored = pixels.restore(side, &plane);
+            let mut restored = vec![f32::NAN; IMAGE_SIZE];
+            pixels.restore_into(side, &plane, restored.as_mut_slice().try_into().unwrap());
             for (i, &v) in restored.iter().enumerate() {
                 let expected = 1.
                     + (i % IMAGE_WIDTH) as f32 / (IMAGE_WIDTH - 1) as f32
