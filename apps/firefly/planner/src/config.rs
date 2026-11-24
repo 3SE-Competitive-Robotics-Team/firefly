@@ -43,6 +43,33 @@ mod tests {
     use super::PlannerToml;
     use firefly_planner::manager::DEFAULT_REPLAN_THRESH;
 
+    #[test]
+    fn registered_field_loads_only_the_configured_asset_at_its_surveyed_pose() {
+        use sha2::{Digest, Sha256};
+        let path = "apps/firefly/planner/maps/gate.ffmap";
+        let digest = format!("{:x}", Sha256::digest(include_bytes!("../maps/gate.ffmap")));
+        let toml = format!(
+            r#"[mapping.field]
+path = "{path}"
+sha256 = "{digest}"
+odom_from_field_translation = [-8.0, 0.0, 0.0]
+odom_from_field_xyzw = [0.0, 0.0, 0.0, 1.0]"#
+        );
+        let mut config: PlannerToml = toml::from_str(&toml).unwrap();
+        let map = config.mapping.build(0.).unwrap();
+        assert!(
+            map.cell_at(
+                nalgebra::Vector3::new(0.55, 2.15, 0.05),
+                0.,
+                std::time::Duration::ZERO
+            )
+            .unwrap()
+            .fixed_occupied
+        );
+        config.mapping.field.as_mut().unwrap().sha256.clear();
+        assert!(config.mapping.build(0.).is_err());
+    }
+
     /// 随仓库发布的配置文件必须可解析且为完整部署值。
     #[test]
     fn shipped_config_parses() {
@@ -87,12 +114,23 @@ mod tests {
 }
 
 /// 在线滚动地图；米，范围至少覆盖默认深度 8m 与局部规划视野。
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MappingOptions {
     pub resolution: f64,
     pub range: [f64; 3],
     pub depth: DepthOptions,
+    pub field: Option<RegisteredField>,
+}
+
+/// Surveyed for the current odometry session. Both pose and asset identity are explicit.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegisteredField {
+    pub path: std::path::PathBuf,
+    pub sha256: String,
+    pub odom_from_field_translation: [f64; 3],
+    pub odom_from_field_xyzw: [f64; 4],
 }
 impl Default for MappingOptions {
     fn default() -> Self {
@@ -100,6 +138,7 @@ impl Default for MappingOptions {
             resolution: 0.1,
             range: [8., 8., 4.],
             depth: DepthOptions::default(),
+            field: None,
         }
     }
 }
@@ -125,6 +164,8 @@ pub struct DepthOptions {
     pub p_max: f64,
     pub p_occ: f64,
     pub fading_time: f64,
+    /// Optional hard lifetime for occupied evidence, in measurement seconds.
+    pub occupied_max_age: Option<f64>,
     /// Maximum timestamp gap between the two odometry samples used for interpolation.
     pub max_pose_gap: f64,
     /// Extra fusion extent around the planning grid; coverage is still checked at runtime.
@@ -153,6 +194,7 @@ impl Default for DepthOptions {
             p_max: 0.90,
             p_occ: 0.80,
             fading_time: 1000.,
+            occupied_max_age: None,
             max_pose_gap: 0.05,
             window_margin: 1.,
         }
@@ -174,7 +216,7 @@ impl DepthOptions {
         &self,
         grid: &firefly_map::GridMap,
         clearance: f64,
-    ) -> Result<firefly_ego_map::MappingParameters> {
+    ) -> Result<firefly_map::depth::MappingParameters> {
         let extrinsic = self.extrinsic()?;
         if !self.max_pose_gap.is_finite()
             || self.max_pose_gap <= 0.
@@ -200,7 +242,7 @@ impl DepthOptions {
         }
         let [fx, fy, cx, cy] = self.intrinsics;
         let padding = self.window_margin + extrinsic.translation.vector.norm();
-        Ok(firefly_ego_map::MappingParameters {
+        Ok(firefly_map::depth::MappingParameters {
             resolution: grid.resolution(),
             local_update_range: (grid.size() * 0.5 + nalgebra::Vector3::repeat(padding)).into(),
             obstacles_inflation: clearance,
@@ -220,7 +262,9 @@ impl DepthOptions {
             p_max: self.p_max,
             p_occ: self.p_occ,
             fading_time: self.fading_time,
-            ..Default::default()
+            occupied_max_age: self
+                .occupied_max_age
+                .or_else(|| (self.fading_time > 0.).then_some(self.fading_time)),
         })
     }
 }
@@ -242,6 +286,28 @@ impl MappingOptions {
             .with_obstacles_inflation(clearance)
             .build()?;
         map.move_ring_buffer(nalgebra::Vector3::zeros());
+        if let Some(field) = &self.field {
+            use sha2::{Digest, Sha256};
+            let transform = firefly_base::RigidTransform::from_parts(
+                firefly_base::FrameId::ODOM,
+                firefly_base::FrameId::MAP,
+                field.odom_from_field_translation,
+                field.odom_from_field_xyzw,
+            )?;
+            let path = firefly_config::paths::root().join(&field.path);
+            let asset = std::fs::read_to_string(&path)
+                .map_err(|e| Error::from(e).with_operation("load registered field"))?;
+            if !format!("{:x}", Sha256::digest(asset.as_bytes()))
+                .eq_ignore_ascii_case(&field.sha256)
+            {
+                return Err(Error::new(
+                    ErrorKind::InvalidArgument,
+                    "registered field SHA-256 mismatch",
+                ));
+            }
+            let file: firefly_map::MapFile = asset.parse()?;
+            file.install_fixed(&mut map, transform.isometry())?;
+        }
         Ok(map)
     }
 }

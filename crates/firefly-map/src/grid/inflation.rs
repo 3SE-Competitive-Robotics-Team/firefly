@@ -94,7 +94,7 @@ impl GridMap {
                     }
                     let index = ((di + 1) * 3 + (dj + 1)) as usize * 3 + (dk + 1) as usize;
                     if wall_blocked[(dk + 1) as usize]
-                        || self.sensor_occupied([
+                        || self.external_blocked([
                             g[0] + i64::from(di),
                             g[1] + i64::from(dj),
                             g[2] + i64::from(dk),
@@ -113,8 +113,15 @@ impl GridMap {
     pub fn inflate_at(&self, idx: [usize; 3]) -> u16 {
         let global = self.global_index(idx);
         let count = self.inflate[self.inf_addr(global)];
-        if self.sensor_occupied(global) {
+        if self.sensor_occupied(global)
+            || self
+                .field
+                .as_ref()
+                .is_some_and(|f| f.geometry.is_occupied(global))
+        {
             count.max(GRID_MAP_OBS_FLAG + 1)
+        } else if self.external_blocked(global) {
+            count.max(1)
         } else {
             count
         }
@@ -129,7 +136,7 @@ impl GridMap {
                 return true;
             }
         }
-        self.sensor_occupied(g) || self.inflate[self.inf_addr(g)] > 0
+        self.external_blocked(g) || self.inflate[self.inf_addr(g)] > 0
     }
 
     /// 位置是否落在膨胀层内（官方 `getInflateOccupancy(pos)`：虚拟墙命中视为
@@ -143,7 +150,7 @@ impl GridMap {
         if !self.in_inf_window(g) {
             return false;
         }
-        self.sensor_occupied(g) || self.inflate[self.inf_addr(g)] > 0
+        self.external_blocked(g) || self.inflate[self.inf_addr(g)] > 0
     }
 
     /// 膨胀计数缓冲增量更新（对照 `grid_map.h:259-300` `changeInfBuf`）。
@@ -154,8 +161,7 @@ impl GridMap {
         self.change_inf_buf_global(dir, self.global_index(idx), true);
     }
 
-    /// 全局索引版膨胀增量更新（`clearBuffer` 共用；`inflate_obstacles`
-    /// 重建时调用不计版本，重建结束统一同步）。
+    /// 按全局索引更新一个障碍源及其邻域的膨胀计数。
     pub(super) fn change_inf_buf_global(&mut self, dir: bool, g: [i64; 3], track: bool) {
         if track {
             self.touch();
@@ -240,9 +246,9 @@ mod tests {
                 }
             }
         }
-        for x in map.inf_low[0]..=map.inf_up[0] {
-            for y in map.inf_low[1]..=map.inf_up[1] {
-                for z in map.inf_low[2]..=map.inf_up[2] {
+        for x in map.inf_bounds.low[0]..map.inf_bounds.end[0] {
+            for y in map.inf_bounds.low[1]..map.inf_bounds.end[1] {
+                for z in map.inf_bounds.low[2]..map.inf_bounds.end[2] {
                     let g = [x, y, z];
                     let mut expected = 0;
                     for obstacle in &obstacles {
@@ -257,6 +263,74 @@ mod tests {
                     }
                     assert_eq!(map.inflate[map.inf_addr(g)], expected, "voxel {g:?}");
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn rolling_occupancy_and_inflation_match_world_voxels() {
+        use std::collections::HashSet;
+
+        let priors = [[0, 0, 0], [-1, 1, -1], [7, 4, 2]];
+        for dims in [[4, 4, 4], [5, 4, 3], [1, 3, 2]] {
+            let mut map = GridMapBuilder::new(1.0, dims).build().unwrap();
+            let mut obstacles = HashSet::new();
+            for global in priors {
+                map.set_prior_global_occupied(global);
+            }
+            for x in 0..dims[0] {
+                for y in 0..dims[1] {
+                    for z in 0..dims[2] {
+                        if (x + y + z) % 3 != 1 {
+                            map.set_state([x, y, z], VoxelState::Occupied);
+                            obstacles.insert([x, y, z].map(|v| v as i64));
+                        }
+                    }
+                }
+            }
+
+            let mut previous_low = [0; 3];
+            for low in [
+                [0; 3],
+                [1, 0, 0],
+                [0, 0, 0],
+                [-1, 1, -1],
+                [1, 2, 0],
+                [100_000, -9, 7],
+                [4, 3, 1],
+                [0; 3],
+            ] {
+                // Make a pending edit in the outgoing window immediately before each move.
+                map.set_state([0; 3], VoxelState::Occupied);
+                obstacles.insert(previous_low);
+                let end: [i64; 3] = std::array::from_fn(|i| low[i] + dims[i] as i64);
+                let covered = |cell: &[i64; 3]| (0..3).all(|i| (low[i]..end[i]).contains(&cell[i]));
+                obstacles.retain(covered);
+                obstacles.extend(priors.into_iter().filter(covered));
+                let center: [f64; 3] =
+                    std::array::from_fn(|i| (low[i] + (dims[i] / 2) as i64) as f64);
+                map.move_ring_buffer(Vector3::from(center));
+                for x in low[0]..end[0] {
+                    for y in low[1]..end[1] {
+                        for z in low[2]..end[2] {
+                            let global = [x, y, z];
+                            let index = map.window_index(global).expect("in the reference window");
+                            assert_eq!(map.global_index(index), global);
+                            assert_eq!(
+                                map.state(index) == VoxelState::Occupied,
+                                obstacles.contains(&global),
+                                "dims {dims:?}, low {low:?}, voxel {global:?}"
+                            );
+                        }
+                    }
+                }
+                for axis in 0..3 {
+                    let mut outside = low;
+                    outside[axis] = end[axis];
+                    assert_eq!(map.window_index(outside), None);
+                }
+                assert_inflation_counts(&map);
+                previous_low = low;
             }
         }
     }

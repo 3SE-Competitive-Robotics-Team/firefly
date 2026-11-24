@@ -3,6 +3,8 @@ use crate::map_input::MapInput;
 use firefly_pubsub::odom::OdomMessage;
 use nalgebra::{UnitQuaternion, Vector3};
 
+mod mujoco_revisit;
+
 fn odometry(timestamp: f64, x: f64) -> OdomMessage {
     OdomMessage {
         timestamp,
@@ -44,6 +46,44 @@ fn frame(timestamp: f64, units: u16, received: Instant) -> DepthFrame {
     }
 }
 
+#[test]
+#[ignore = "Release timing of repeated fused depth snapshots"]
+fn repeated_snapshot_timing() {
+    let mapping = crate::config::MappingOptions::default();
+    let source = mapping.build(0.4).unwrap();
+    let mut fusion = DepthFusion::new(&source, mapping.depth, 0.4).unwrap();
+    let now = Instant::now();
+    for moving in [false, true] {
+        let mut times = Vec::new();
+        let mut totals = Vec::new();
+        for i in 0..50 {
+            let stamp = 1. + f64::from(i) * 0.032 + if moving { 2. } else { 0. };
+            let frame = DepthFrame {
+                timestamp: stamp,
+                received: now,
+                image: DepthImage::new(320, 240, vec![2000; 320 * 240]).unwrap(),
+                trace: TraceContext::default(),
+            };
+            let pose =
+                Isometry3::translation(if moving { 0.11 * f64::from(i % 2) } else { 0. }, 0., 0.);
+            let all = Instant::now();
+            fusion.integrate(frame, pose, stamp).unwrap();
+            let start = Instant::now();
+            let snapshot = std::hint::black_box(fusion.snapshot().unwrap());
+            if i > 9 {
+                assert_eq!(snapshot.unwrap().last_observed_at, stamp);
+                times.push(start.elapsed().as_secs_f64() * 1e6);
+                totals.push(all.elapsed().as_secs_f64() * 1e6);
+            }
+        }
+        times.sort_by(f64::total_cmp);
+        totals.sort_by(f64::total_cmp);
+        println!(
+            "moving={moving} snapshot_us p50={} p95={} fuse_and_snapshot_us p50={} p95={}",
+            times[20], times[37], totals[20], totals[37]
+        );
+    }
+}
 #[test]
 fn mapping_timers_are_independent_and_keep_their_phase() {
     let start = Instant::now();
@@ -217,13 +257,25 @@ fn ground_depth_does_not_observe_air_above_the_camera() {
             .unwrap();
     }
     let snapshot = fusion.snapshot().unwrap().unwrap();
-    assert!(snapshot.observed.is_free(camera.translation.vector));
-    assert!(snapshot.observed.is_free(Vector3::new(0.5, -0.0071, 0.8)));
+    let is_free = |point| {
+        matches!(
+            snapshot
+                .map
+                .observed
+                .sample(point, snapshot.last_observed_at, Duration::from_secs(1)),
+            firefly_map::OnlineState::Free(_)
+        )
+    };
+    assert!(is_free(camera.translation.vector));
+    assert!(is_free(Vector3::new(0.5, -0.0071, 0.8)));
     let above = Vector3::new(0.0454, -0.0075, 1.0011);
-    assert!(!snapshot.observed.is_free(above));
-    assert_eq!(fusion.map.inflated_occupancy_at(above), 0);
-    let (native, _, _) = fusion.map.observed_free_buffer();
-    assert!(!native[fusion.map.buffer_index(above).unwrap()]);
+    assert!(!is_free(above));
+    assert!(
+        !snapshot
+            .map
+            .collision
+            .is_occupied(source.pos_to_global_index(above))
+    );
 }
 
 #[test]
@@ -236,7 +288,7 @@ fn full_depth_to_collision_path_preserves_native_inflation_and_clears_obstacles(
     .build(0.25)
     .unwrap();
     let mut fusion = DepthFusion::new(&source, options(), 0.25).unwrap();
-    let mut collision = collision_grid(&source).unwrap();
+    let mut collision = source.clone();
     assert_eq!(collision.origin(), source.origin());
     assert_eq!(collision.global_index([0; 3]), source.global_index([0; 3]));
     let mut input = MapInput::default();
@@ -254,12 +306,14 @@ fn full_depth_to_collision_path_preserves_native_inflation_and_clears_obstacles(
     let snapshot = fusion.snapshot().unwrap().unwrap();
     let nav = odometry(1.3, 0.);
     input.observe_local(snapshot).unwrap();
-    input.prepare_region(&mut collision, &nav, true);
     assert_eq!(
-        input.status(&nav, now, Duration::from_secs(1)),
+        input.synchronize(&mut collision, &nav, now, Duration::from_secs(1)),
         crate::map_input::MapStatus::Ready
     );
-    input.apply(&mut collision, &nav, true).unwrap();
+    assert_eq!(
+        input.synchronize(&mut collision, &nav, now, Duration::from_secs(1)),
+        crate::map_input::MapStatus::Ready
+    );
     assert!(collision.is_occupied_inflated(Vector3::new(0.125, 0.125, 0.625)));
     for x in 0..collision.dims()[0] {
         for y in 0..collision.dims()[1] {
@@ -269,7 +323,7 @@ fn full_depth_to_collision_path_preserves_native_inflation_and_clears_obstacles(
                         * collision.resolution();
                 assert_eq!(
                     collision.is_occupied_inflated(point),
-                    fusion.map.inflated_occupancy_at(point) > 0,
+                    (point - Vector3::new(0.125, 0.125, 0.625)).amax() <= 0.25,
                     "{point:?}"
                 );
             }
@@ -285,8 +339,138 @@ fn full_depth_to_collision_path_preserves_native_inflation_and_clears_obstacles(
     let snapshot = fusion.snapshot().unwrap().unwrap();
     let nav = odometry(2.6, 0.);
     input.observe_local(snapshot).unwrap();
-    input.apply(&mut collision, &nav, true).unwrap();
+    assert_eq!(
+        input.synchronize(&mut collision, &nav, now, Duration::from_secs(1)),
+        crate::map_input::MapStatus::Ready
+    );
     assert!(!collision.is_occupied_inflated(Vector3::new(0.125, 0.125, 0.625)));
+}
+
+#[test]
+fn moved_box_and_unseen_free_space_in_a_registered_field() {
+    use firefly_map::{Evidence, MapFile, OnlineState};
+    let mut map = crate::config::MappingOptions {
+        resolution: 0.25,
+        range: [2.; 3],
+        ..Default::default()
+    }
+    .build(0.25)
+    .unwrap();
+    let field: MapFile = "FORMAT firefly-map 1\nRESOLUTION 0.25\nORIGIN 0 0 0\nDIMS 8 8 8\nOCCUPANCY\n0.125 0.125 1.125\n".parse().unwrap();
+    field
+        .install_fixed(&mut map, &Isometry3::identity())
+        .unwrap();
+    let box_at = Vector3::new(0.125, 0.125, 0.625);
+    let wall = Vector3::new(0.125, 0.125, 1.125);
+    let mut fusion = DepthFusion::new(&map, options(), 0.25).unwrap();
+    let mut input = MapInput::default();
+    let received = Instant::now();
+    let mut fuse = |map: &mut firefly_map::GridMap, stamp, units, pose| {
+        fusion
+            .integrate(frame(stamp, units, received), pose, 100. + stamp)
+            .unwrap();
+        if let Some(snapshot) = fusion.snapshot().unwrap() {
+            input.observe_local(snapshot).unwrap();
+            assert_eq!(
+                input.synchronize(map, &odometry(stamp, 0.), received, Duration::from_secs(1)),
+                crate::map_input::MapStatus::Ready
+            );
+        }
+    };
+    let max_age = Duration::from_secs(1);
+    for i in 0..5 {
+        fuse(&mut map, f64::from(i), 500, Isometry3::identity());
+    }
+    let before = map.clone();
+    let original = before.cell_at(box_at, 4., max_age).unwrap();
+    assert!(original.collision && !original.fixed_occupied);
+    assert_eq!(original.online, OnlineState::Occupied(4.));
+
+    for i in 5..20 {
+        fuse(&mut map, f64::from(i), 1750, Isometry3::identity());
+    }
+    let empty = map.cell_at(box_at, 19., max_age).unwrap();
+    assert!(!empty.collision && !empty.fixed_occupied);
+    assert_eq!(empty.online, OnlineState::Free(19.));
+    let fixed = map.cell_at(wall, 19., max_age).unwrap();
+    assert!(fixed.fixed_occupied && fixed.collision);
+    assert_eq!(fixed.online, OnlineState::Free(19.));
+
+    let side = Isometry3::rotation(Vector3::y() * std::f64::consts::FRAC_PI_2);
+    fuse(&mut map, 21., 500, side);
+    assert_eq!(
+        map.cell_at(box_at, 21., max_age).unwrap().online,
+        OnlineState::Expired(Evidence::Free(19.))
+    );
+    assert!(map.cell_at(wall, 21., max_age).unwrap().collision);
+    assert_eq!(before.cell_at(box_at, 4., max_age).unwrap(), original);
+}
+
+#[test]
+fn occupied_lifetime_retracts_only_online_geometry_on_maintenance_or_reobservation() {
+    let box_at = Vector3::new(0.125, 0.125, 0.625);
+    for revisit in [false, true] {
+        let mut map = source();
+        map.move_ring_buffer(Vector3::zeros());
+        let wall = [3, 0, 2];
+        map.set_prior_global_occupied(wall);
+        map.inflate_obstacles();
+        // A single fresh hit stays below threshold after the saturated prior expires.
+        let opts = DepthOptions {
+            p_hit: 0.7,
+            occupied_max_age: Some(2.),
+            fading_time: 0.,
+            ..options()
+        };
+        let mut fusion = DepthFusion::new(&map, opts, 0.25).unwrap();
+        let mut input = MapInput::default();
+        let now = Instant::now();
+        for i in 0..10 {
+            let t = f64::from(i) * 0.125;
+            fusion
+                .integrate(frame(t, 500, now), Isometry3::identity(), t)
+                .unwrap();
+        }
+        let t = 9. * 0.125;
+        input
+            .observe_local(fusion.snapshot().unwrap().unwrap())
+            .unwrap();
+        assert_eq!(
+            input.synchronize(&mut map, &odometry(t, 0.), now, Duration::from_secs(1)),
+            crate::map_input::MapStatus::Ready
+        );
+        let old = map.clone();
+        assert!(old.is_occupied_inflated(box_at));
+        let side = Isometry3::rotation(Vector3::y() * std::f64::consts::FRAC_PI_2);
+        for (age, expected) in [(2., true), (2.125, false)] {
+            let stamp = t + age;
+            let pose = if revisit && !expected {
+                Isometry3::identity()
+            } else {
+                side
+            };
+            fusion
+                .integrate(frame(stamp, 500, now), pose, stamp)
+                .unwrap();
+            if !revisit || expected {
+                fusion.map.fade();
+            }
+            input
+                .observe_local(fusion.snapshot().unwrap().unwrap())
+                .unwrap();
+            assert_eq!(
+                input.synchronize(&mut map, &odometry(stamp, 0.), now, Duration::from_secs(1)),
+                crate::map_input::MapStatus::Ready
+            );
+            assert_eq!(map.is_occupied_inflated(box_at), expected);
+            assert!(
+                map.cell_at(Vector3::new(0.875, 0.125, 0.625), stamp, Duration::ZERO)
+                    .unwrap()
+                    .fixed_occupied
+            );
+        }
+        assert!(old.is_occupied_inflated(box_at));
+    }
 }
 
 #[test]
@@ -307,17 +491,33 @@ fn empty_images_and_fading_cannot_refresh_map_age() {
             1.2,
         )
         .unwrap();
-    fusion.map.fading_callback();
+    for stamp in [1.2, 1.15] {
+        assert!(
+            !fusion
+                .integrate(frame(stamp, 500, now), Isometry3::identity(), 2.)
+                .unwrap()
+        );
+    }
+    fusion.map.fade();
     let snapshot = fusion.snapshot().unwrap().unwrap();
-    assert_eq!(snapshot.timestamp, 1.1);
+    assert_eq!(snapshot.last_observed_at, 1.1);
     assert_eq!(snapshot.fused_at, now);
-    let mut collision = collision_grid(&source()).unwrap();
+    let mut collision = source();
     let mut input = MapInput::default();
     input.observe_local(snapshot).unwrap();
-    let nav = odometry(1.2, 0.);
-    input.prepare_region(&mut collision, &nav, true);
     assert_eq!(
-        input.status(
+        input.synchronize(
+            &mut collision,
+            &odometry(1.15, 0.),
+            now,
+            Duration::from_secs(1)
+        ),
+        crate::map_input::MapStatus::Waiting
+    );
+    let nav = odometry(1.2, 0.);
+    assert_eq!(
+        input.synchronize(
+            &mut collision,
             &nav,
             now + Duration::from_millis(1001),
             Duration::from_secs(1)
@@ -327,7 +527,7 @@ fn empty_images_and_fading_cannot_refresh_map_age() {
 }
 
 #[test]
-fn cached_masks_match_live_voxels_after_fusion_fading_and_window_moves() {
+fn published_sequence_and_measurement_time_survive_fading_and_window_moves() {
     let options = DepthOptions {
         fading_time: 0.51,
         ..options()
@@ -363,34 +563,13 @@ fn cached_masks_match_live_voxels_after_fusion_fading_and_window_moves() {
         }
         for fade in [false, true] {
             if fade {
-                fusion.map.fading_callback();
+                fusion.map.fade();
             }
             let snapshot = fusion.snapshot().unwrap().unwrap();
             assert_eq!(snapshot.sequence, last_sequence + 1);
-            assert_eq!(snapshot.timestamp, timestamp);
+            assert_eq!(snapshot.last_observed_at, timestamp);
             assert_eq!(snapshot.fused_at, now);
             last_sequence = snapshot.sequence;
-            let (low, high) = fusion.map.bounds().unwrap();
-            let (free, _, _) = fusion.map.observed_free_buffer();
-            for z in low[2]..=high[2] {
-                for y in low[1]..=high[1] {
-                    for x in low[0]..=high[0] {
-                        let point = (Vector3::new(x, y, z).cast::<f64>() + Vector3::repeat(0.5))
-                            * fusion.map.resolution();
-                        let global = ((point - fusion.collision_origin)
-                            / fusion.collision_resolution)
-                            .map(|v| v.floor() as i64);
-                        assert_eq!(
-                            snapshot.collision.is_occupied(global.into()),
-                            fusion.map.inflated_occupancy_at(point) > 0
-                        );
-                        assert_eq!(
-                            snapshot.observed.is_free(point),
-                            free[fusion.map.buffer_index(point).unwrap()]
-                        );
-                    }
-                }
-            }
         }
     }
 }
@@ -408,13 +587,12 @@ fn local_map_requires_exact_coverage() {
         .integrate(frame(1.1, 500, now), Isometry3::identity(), 1.1)
         .unwrap();
     let mut snapshot = fusion.snapshot().unwrap().unwrap();
-    snapshot.bounds.max[0] = 0.5;
+    snapshot.map.bounds.max[0] = 0.5;
     let mut input = MapInput::default();
-    let mut collision = collision_grid(&source()).unwrap();
+    let mut collision = source();
     input.observe_local(snapshot).unwrap();
-    input.prepare_region(&mut collision, &nav, true);
     assert_ne!(
-        input.status(&nav, now, Duration::from_secs(1)),
+        input.synchronize(&mut collision, &nav, now, Duration::from_secs(1)),
         crate::map_input::MapStatus::Ready
     );
 }
@@ -460,6 +638,15 @@ fn depth_uses_body_odometry_and_camera_extrinsics_in_order() {
         fusion.integrate(frame(time, 500, now), pose, time).unwrap();
     }
     let expected = Vector3::new(0.4, 1.05, 0.2);
-    assert!((fusion.map.projected_points()[0] - expected).norm() < 1e-12);
-    assert!(fusion.map.inflated_occupancy_at(expected) > 0);
+    let snapshot = fusion.snapshot().unwrap().unwrap();
+    assert_eq!(
+        snapshot.map.observed.sample(expected, 1.3, Duration::ZERO),
+        firefly_map::OnlineState::Occupied(1.3)
+    );
+    assert!(
+        snapshot
+            .map
+            .collision
+            .is_occupied(source().pos_to_global_index(expected))
+    );
 }

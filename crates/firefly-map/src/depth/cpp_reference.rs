@@ -1,6 +1,6 @@
 //! Differential test against the fixed upstream C++ bodies, not a Rust-generated baseline.
 //! Build the oracle with tests/reference/generate.py, then explicitly run this ignored test.
-use firefly_ego_map::{DepthImage, GridMap, MappingParameters};
+use super::{DepthImage, MappingParameters, grid::GridMap};
 use nalgebra::{Isometry3, Translation3, UnitQuaternion, Vector3};
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -87,16 +87,13 @@ fn snapshot(map: &GridMap) -> Vec<f64> {
 #[test]
 #[ignore = "requires the pinned upstream C++ oracle built by tests/reference/generate.py"]
 fn cpp_local_mapping_matches_each_update() {
-    let binary = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/ego-map-reference/reference");
+    let binary =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ego-map-reference");
     for variant in 0..3 {
         let config = MappingParameters {
             resolution: 0.5,
             local_update_range: [2.0, 2.0, 1.5],
             obstacles_inflation: 0.5,
-            enable_virtual_wall: true,
-            virtual_ground: -0.1,
-            virtual_ceil: 2.0,
             fx: 2.0,
             fy: 3.0,
             cx: 1.0,
@@ -104,13 +101,16 @@ fn cpp_local_mapping_matches_each_update() {
             use_depth_filter: variant == 1,
             depth_filter_margin: i32::from(variant == 1),
             depth_filter_mindist: 0.2,
-            depth_filter_tolerance: 0.15,
             k_depth_scaling_factor: 1000.0,
             skip_pixel: if variant == 2 { 2 } else { 1 },
             fading_time: 0.25,
             ..MappingParameters::default()
         };
-        let mut map = GridMap::new(config).unwrap();
+        let output = crate::GridMapBuilder::new(config.resolution, [8; 3])
+            .build()
+            .unwrap();
+        let mut map = super::DepthMapper::new(config, Isometry3::identity(), &output).unwrap();
+        map.grid.reference_wall = Some((-0.1, 2.0));
         let mut input = format!("{variant}\n");
         let mut expected = Vec::new();
         for operation in operations() {
@@ -135,39 +135,34 @@ fn cpp_local_mapping_matches_each_update() {
                         Translation3::from(Vector3::from(position)),
                         UnitQuaternion::from_axis_angle(&Vector3::z_axis(), angle),
                     );
-                    map.depth_pose_callback(DepthImage::new(4, 4, pixels).unwrap(), pose)
+                    map.integrate(DepthImage::new(4, 4, pixels).unwrap(), pose, now, now)
                         .unwrap();
-                    map.update_occupancy_callback(now).unwrap();
                 }
                 Operation::Tick(now) => {
                     writeln!(input, "T {now:.17}").unwrap();
-                    map.update_occupancy_callback(now).unwrap();
+                    map.timed_out_at(now).unwrap();
                 }
                 Operation::Fade => {
                     input.push_str("F\n");
-                    map.fading_callback();
+                    map.fade();
                 }
             }
-            expected.push(snapshot(&map));
+            expected.push(snapshot(&map.grid));
         }
-        let mut child = Command::new(&binary)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("start the C++ oracle built by tests/reference/generate.py");
-        let mut stdin = child.stdin.take().unwrap();
-        // Drain stdout concurrently with input to avoid filling either OS pipe.
-        let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
-        let output = child.wait_with_output().unwrap();
-        writer.join().unwrap().unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
+        let original = replay(&binary.join("reference"), input.clone());
+        let corrected = replay(&binary.join("reference-boundaries"), input);
+        let changed_steps = original
+            .lines()
+            .zip(corrected.lines())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(original.lines().count(), expected.len());
+        eprintln!(
+            "variant {variant}: {changed_steps}/{} snapshots changed by the two boundary rules",
+            expected.len()
         );
-        let text = String::from_utf8(output.stdout).unwrap();
-        let actual: Vec<_> = text.lines().collect();
+        assert!(changed_steps > 0);
+        let actual: Vec<_> = corrected.lines().collect();
         assert_eq!(actual.len(), expected.len());
         for (step, (line, expected)) in actual.iter().zip(expected).enumerate() {
             let actual: Vec<f64> = line
@@ -188,4 +183,24 @@ fn cpp_local_mapping_matches_each_update() {
             }
         }
     }
+}
+
+fn replay(binary: &std::path::Path, input: String) -> String {
+    let mut child = Command::new(binary)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start the C++ oracle built by tests/reference/generate.py");
+    let mut stdin = child.stdin.take().unwrap();
+    // Drain stdout concurrently with input to avoid filling either OS pipe.
+    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+    let output = child.wait_with_output().unwrap();
+    writer.join().unwrap().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
 }

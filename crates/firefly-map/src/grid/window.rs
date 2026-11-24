@@ -1,3 +1,4 @@
+use super::voxel_box::VoxelBox;
 use super::{GRID_MAP_OBS_FLAG, GridMap, VoxelState};
 use nalgebra::Vector3;
 
@@ -23,14 +24,18 @@ impl GridMap {
         self.resolution
     }
 
+    pub(crate) fn world_origin(&self) -> Vector3<f64> {
+        self.world_origin
+    }
+
     /// 当前窗口下界角点（世界坐标）＝窗口坐标 `[0,0,0]` 体素的角点；随
     /// `move_ring_buffer` 平移，构造后等于 builder 注入的 origin。
     #[must_use]
     pub fn origin(&self) -> Vector3<f64> {
         Vector3::new(
-            self.world_origin.x + self.low[0] as f64 * self.resolution,
-            self.world_origin.y + self.low[1] as f64 * self.resolution,
-            self.world_origin.z + self.low[2] as f64 * self.resolution,
+            self.world_origin.x + self.bounds.low[0] as f64 * self.resolution,
+            self.world_origin.y + self.bounds.low[1] as f64 * self.resolution,
+            self.world_origin.z + self.bounds.low[2] as f64 * self.resolution,
         )
     }
 
@@ -52,9 +57,9 @@ impl GridMap {
     #[must_use]
     pub fn local_update_range(&self) -> Vector3<f64> {
         Vector3::new(
-            self.local_update_range3i[0] as f64 * self.resolution,
-            self.local_update_range3i[1] as f64 * self.resolution,
-            self.local_update_range3i[2] as f64 * self.resolution,
+            (self.dims[0] / 2) as f64 * self.resolution,
+            (self.dims[1] / 2) as f64 * self.resolution,
+            (self.dims[2] / 2) as f64 * self.resolution,
         )
     }
     /// 世界位置 → 全局体素索引（世界锚定整数，不随窗口平移；纯映射，不含窗口判定）。
@@ -70,43 +75,33 @@ impl GridMap {
     /// 世界位置 → 全局体素索引；仅在落入当前窗口时返回。
     pub(super) fn window_global(&self, p: Vector3<f64>) -> Option<[i64; 3]> {
         let g = self.pos_to_global_index(p);
-        self.in_window_global(g).then_some(g)
-    }
-
-    pub(super) fn in_window_global(&self, g: [i64; 3]) -> bool {
-        g.iter()
-            .zip(&self.low)
-            .zip(&self.up)
-            .all(|((&gi, &lo), &up)| gi >= lo && gi <= up)
+        self.bounds.contains(g).then_some(g)
     }
 
     pub(super) fn in_inf_window(&self, g: [i64; 3]) -> bool {
-        g.iter()
-            .zip(&self.inf_low)
-            .zip(&self.inf_up)
-            .all(|((&gi, &lo), &up)| gi >= lo && gi <= up)
+        self.inf_bounds.contains(g)
     }
 
     /// 窗口坐标 → 全局体素索引（世界锚定）。
     #[must_use]
     pub fn global_index(&self, coord: [usize; 3]) -> [i64; 3] {
         [
-            coord[0] as i64 + self.low[0],
-            coord[1] as i64 + self.low[1],
-            coord[2] as i64 + self.low[2],
+            coord[0] as i64 + self.bounds.low[0],
+            coord[1] as i64 + self.bounds.low[1],
+            coord[2] as i64 + self.bounds.low[2],
         ]
     }
 
     /// 全局体素索引 → 窗口坐标；不在当前窗口时返回 `None`。
     #[must_use]
     pub fn window_index(&self, global: [i64; 3]) -> Option<[usize; 3]> {
-        if !self.in_window_global(global) {
+        if !self.bounds.contains(global) {
             return None;
         }
         Some([
-            (global[0] - self.low[0]) as usize,
-            (global[1] - self.low[1]) as usize,
-            (global[2] - self.low[2]) as usize,
+            (global[0] - self.bounds.low[0]) as usize,
+            (global[1] - self.bounds.low[1]) as usize,
+            (global[2] - self.bounds.low[2]) as usize,
         ])
     }
     /// 全局索引 → 占据缓冲线性地址：`(id − ring_origin) % size` 取模映射后行主序展开。
@@ -138,10 +133,13 @@ impl GridMap {
         c[0] = a / (self.dims[1] * self.dims[2]);
         let mut g = [0i64; 3];
         for i in 0..3 {
-            g[i] = c[i] as i64 + self.ring_origin[i];
-            if g[i] > self.up[i] {
-                g[i] -= self.dims[i] as i64;
-            }
+            let offset = c[i] as i64;
+            let until_wrap = self.bounds.end[i] - self.ring_origin[i];
+            g[i] = if offset < until_wrap {
+                self.ring_origin[i] + offset
+            } else {
+                self.bounds.low[i] + (offset - until_wrap)
+            };
         }
         g
     }
@@ -150,97 +148,48 @@ impl GridMap {
         self.window_index(self.pos_to_global_index(p))
     }
 
-    /// 窗口随相机重定心，清除移出区域；感知更新先平移窗口再投影。
+    /// 按整格移动窗口，保留交集内的占据与膨胀贡献。中心须有限且窗口边界可用 i64 表示。
     pub fn move_ring_buffer(&mut self, center: Vector3<f64>) {
-        let cg = self.pos_to_global_index(center);
-        if cg != self.center_last {
-            // 在旧寻址下同步障碍源，确保清除条带能够完整撤销它们的邻域贡献。
-            self.inflate_obstacles();
-            self.touch();
+        if !center.iter().all(|v| v.is_finite()) {
+            return;
         }
-        let lr = self.local_update_range3i;
-        let mut new_low = [0i64; 3];
-        let mut new_up = [0i64; 3];
-        let mut new_inf_low = [0i64; 3];
-        let mut new_inf_up = [0i64; 3];
-        let ig = i64::from(self.inf_grid);
-        for i in 0..3 {
-            new_low[i] = cg[i] - lr[i];
-            new_up[i] = cg[i] + lr[i] - 1;
-            new_inf_low[i] = new_low[i] - ig;
-            new_inf_up[i] = new_up[i] + ig;
-        }
+        let center = self.pos_to_global_index(center);
+        let Some(next) = VoxelBox::centered(center, self.dims) else {
+            return;
+        };
+        let Some(next_inflated) = VoxelBox::centered(center, self.inf_dims) else {
+            return;
+        };
 
-        if cg[0] < self.center_last[0] {
-            self.clear_buffer(0, new_up[0]);
+        // Pending edits still refer to addresses in the old window.
+        self.inflate_obstacles();
+        if self.bounds == next {
+            return;
         }
-        if cg[0] > self.center_last[0] {
-            self.clear_buffer(1, new_low[0]);
-        }
-        if cg[1] < self.center_last[1] {
-            self.clear_buffer(2, new_up[1]);
-        }
-        if cg[1] > self.center_last[1] {
-            self.clear_buffer(3, new_low[1]);
-        }
-        if cg[2] < self.center_last[2] {
-            self.clear_buffer(4, new_up[2]);
-        }
-        if cg[2] > self.center_last[2] {
-            self.clear_buffer(5, new_low[2]);
-        }
+        let retained = self.bounds.intersection(next);
+        self.bounds
+            .visit_difference(retained, |slab| self.clear_region(slab));
 
-        for i in 0..3 {
-            while self.ring_origin[i] < new_low[i] {
-                self.ring_origin[i] += self.dims[i] as i64;
-            }
-            while self.ring_origin[i] > new_up[i] {
-                self.ring_origin[i] -= self.dims[i] as i64;
-            }
-            while self.inf_ring_origin[i] < new_inf_low[i] {
-                self.inf_ring_origin[i] += self.inf_dims[i] as i64;
-            }
-            while self.inf_ring_origin[i] > new_inf_up[i] {
-                self.inf_ring_origin[i] -= self.inf_dims[i] as i64;
-            }
-        }
-
-        self.center_last = cg;
-        self.low = new_low;
-        self.up = new_up;
-        self.inf_low = new_inf_low;
-        self.inf_up = new_inf_up;
-        if !self.prior.is_empty() {
-            let restores: Vec<[usize; 3]> = self
-                .prior
-                .iter()
-                .filter_map(|g| self.window_index(*g))
-                .collect();
-            for idx in restores {
-                self.set_state(idx, VoxelState::Occupied);
+        self.bounds = next;
+        self.inf_bounds = next_inflated;
+        self.ring_origin = next.ring_origin();
+        self.inf_ring_origin = next_inflated.ring_origin();
+        self.touch();
+        for &global in std::sync::Arc::clone(&self.prior).iter() {
+            if let Some(index) = self.window_index(global)
+                && !retained.is_some_and(|shared| shared.contains(global))
+            {
+                self.set_state(index, VoxelState::Occupied);
             }
         }
         self.inflate_obstacles();
     }
 
-    /// 清除移出窗口的体素条带（对照官方 `clearBuffer(casein, bound)`，
-    /// `grid_map.cpp:747`）：case 偶数 = 向负方向移动（清 `[bound, 旧上界]`）、
-    /// 奇数 = 向正方向移动（清 `[旧下界, bound]`），正交两轴取旧窗口全域；
-    /// 移动方向的边界列多清一格，与官方一致。占据状态清空，
-    /// 障碍源从膨胀层反向移除（`>= FLAG`：firefly 的邻域更新跳过窗外体素，
-    /// 窗缘障碍可能恰持 FLAG，须一并清除）。
-    fn clear_buffer(&mut self, case: usize, bound: i64) {
-        let x0 = if case == 0 { bound } else { self.low[0] };
-        let x1 = if case == 1 { bound } else { self.up[0] };
-        let y0 = if case == 2 { bound } else { self.low[1] };
-        let y1 = if case == 3 { bound } else { self.up[1] };
-        let z0 = if case == 4 { bound } else { self.low[2] };
-        let z1 = if case == 5 { bound } else { self.up[2] };
-        for x in x0.max(self.low[0])..=x1.min(self.up[0]) {
-            for y in y0.max(self.low[1])..=y1.min(self.up[1]) {
-                let mut z = z0.max(self.low[2]);
-                let z_end = z1.min(self.up[2]);
-                while z <= z_end {
+    fn clear_region(&mut self, region: VoxelBox) {
+        for x in region.low[0]..region.end[0] {
+            for y in region.low[1]..region.end[1] {
+                let mut z = region.low[2];
+                while z < region.end[2] {
                     let g = [x, y, z];
                     let a = self.occ_addr(g);
                     let ia = self.inf_addr(g);
@@ -251,18 +200,16 @@ impl GridMap {
                         .min(self.inflate.uniform_len(ia, 0))
                         .min(self.dims[2] - a % self.dims[2])
                         .min(self.inf_dims[2] - ia % self.inf_dims[2])
-                        .min((z_end - z + 1) as usize);
+                        .min((region.end[2] - z) as usize);
                     if skip > 0 {
                         z += skip as i64;
                         continue;
                     }
-                    let value = self.occupancy[a];
-                    if value {
-                        self.touch();
+                    if self.occupancy[a] {
                         self.occupancy[a] = false;
                     }
                     if self.inflate[ia] >= GRID_MAP_OBS_FLAG {
-                        self.change_inf_buf_global(false, g, true);
+                        self.change_inf_buf_global(false, g, false);
                     }
                     z += 1;
                 }
@@ -340,8 +287,10 @@ mod tests {
         assert!(m.is_occupied(Vector3::new(3.5, 2.5, 2.5)));
         assert_eq!(m.state([1, 2, 2]), VoxelState::Occupied); // 窗口 [2,5] 中 x=3 → 坐标 1
         m.move_ring_buffer(Vector3::new(5.5, 2.5, 2.5));
+        assert!(m.is_occupied(Vector3::new(3.5, 2.5, 2.5)));
+        m.move_ring_buffer(Vector3::new(6.5, 2.5, 2.5));
         assert!(!m.is_occupied(Vector3::new(3.5, 2.5, 2.5)));
-        m.set_state([3, 2, 2], VoxelState::Occupied);
+        m.set_state([2, 2, 2], VoxelState::Occupied);
         assert!(m.is_occupied(Vector3::new(6.5, 2.5, 2.5)));
         assert!(!m.is_occupied(Vector3::new(3.5, 2.5, 2.5)));
     }

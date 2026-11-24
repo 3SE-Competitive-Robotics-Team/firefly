@@ -14,13 +14,13 @@ struct Page<T> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct Buffer<T> {
+pub(crate) struct Buffer<T> {
     pages: Arc<Vec<Arc<Page<T>>>>,
     len: usize,
 }
 
 impl<T: Copy> Buffer<T> {
-    pub(super) fn new(value: T, len: usize) -> Self {
+    pub(crate) fn new(value: T, len: usize) -> Self {
         let page = Arc::new(Page {
             data: [value; PAGE_LEN],
             uniform: Some(value),
@@ -31,11 +31,16 @@ impl<T: Copy> Buffer<T> {
         }
     }
 
-    pub(super) const fn len(&self) -> usize {
+    #[cfg(feature = "depth")]
+    pub(crate) fn shares_data(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.pages, &other.pages)
+    }
+
+    pub(crate) const fn len(&self) -> usize {
         self.len
     }
 
-    pub(super) fn fill(&mut self, value: T) {
+    pub(crate) fn fill(&mut self, value: T) {
         // Resetting a shared buffer needs no copies of discarded contents.
         if Arc::strong_count(&self.pages) > 1 {
             *self = Self::new(value, self.len);
@@ -58,7 +63,7 @@ impl<T: Copy> Buffer<T> {
     }
 
     #[cfg(test)]
-    pub(super) fn iter(&self) -> impl Iterator<Item = &T> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &T> {
         self.pages
             .iter()
             .flat_map(|page| page.data.iter())
@@ -67,12 +72,12 @@ impl<T: Copy> Buffer<T> {
 }
 
 impl<T: Copy + PartialEq> Buffer<T> {
-    pub(super) fn is_known_uniform(&self, value: T) -> bool {
+    pub(crate) fn is_known_uniform(&self, value: T) -> bool {
         self.pages.iter().all(|page| page.uniform == Some(value))
     }
 
     /// Known uniform suffix of the containing page, clipped to the logical buffer.
-    pub(super) fn uniform_len(&self, index: usize, value: T) -> usize {
+    pub(crate) fn uniform_len(&self, index: usize, value: T) -> usize {
         if self.pages[index / PAGE_LEN].uniform.as_ref() == Some(&value) {
             (PAGE_LEN - index % PAGE_LEN).min(self.len - index)
         } else {

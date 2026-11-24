@@ -242,6 +242,15 @@ pub fn fields(name: &str) -> Result<&'static [&'static str]> {
         | "traj/reference_hz"
         | "traj/sample_hz" => &["rate_Hz"],
         "planner/replan_ms" => &["latency_ms", "solve_ms", "adopted"],
+        "map/frame_ms" => &["pair_wait_ms", "update_ms"],
+        "map/update_ms" => &[
+            "integrate_ms",
+            "maintenance_ms",
+            "snapshot_ms",
+            "handoff_ms",
+        ],
+        "map/fusion_ms" => &["projection_ms", "window_ms", "raycast_ms", "inflation_ms"],
+        "map/work" => &["projected_rays", "voted_voxels", "cleared_voxels"],
         "planner/fsm_timing_ms" => &["fsm_ms", "step_ms", "period_ms"],
         "traj/timing_ms" => &["tick_ms", "sample_ms", "publish_ms", "period_ms"],
         "fc/standby_eskf/accel_nis" => &["nis"],

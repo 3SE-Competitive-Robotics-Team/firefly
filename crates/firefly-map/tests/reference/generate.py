@@ -4,7 +4,8 @@ Run with --upstream <EGO-Planner-v2 checkout> --eigen <Eigen include directory>.
 Build artifacts live in target/ego-map-reference. The numerical algorithm bodies
 are extracted verbatim, including raycast.cpp; the harness supplies image/clock
 types and initial parameter values, not a second implementation of the algorithm.
-The resulting binary reads the operation stream used by cpp_reference.rs.
+The reference-boundaries binary applies half-open bounds and clears only evicted
+slices. Both binaries read the same operation stream used by cpp_reference.rs.
 """
 
 import argparse
@@ -34,6 +35,32 @@ def functions(source, names):
         for match in matches:
             result.append(braced(source, match.start()).replace("GridMap::", ""))
     return "\n".join(result)
+
+
+def boundary_reference(translation):
+    """Change only the two boundary rules in the pinned oracle for causal comparison."""
+    for axis in range(3):
+        # Upstream clearBuffer loops include the last index on each axis.
+        for case, side, step in [(2 * axis, "up", "+ 1"), (2 * axis + 1, "low", "- 1")]:
+            bound = f"ringbuffer_{side}bound3i_new({axis})"
+            call = f"clearBuffer({case}, {bound});"
+            assert translation.count(call) == 1
+            translation = translation.replace(call, f"clearBuffer({case}, {bound} {step});")
+        for prefix in ["ringbuffer_", "ringbuffer_inf_"]:
+            check = f"pos({axis}) > md_.{prefix}upbound3d_({axis})"
+            assert translation.count(check) == 1
+            translation = translation.replace(check, check.replace(" > ", " >= "))
+    return translation
+
+
+def compile_reference(build, eigen, name, source):
+    cpp = build / f"{name}.cpp"
+    cpp.write_text(source)
+    subprocess.run([
+        "c++", "-std=c++17", "-O2", "-ffp-contract=off", "-fsigned-char",
+        "-I" + str(eigen), "-I" + str(build), str(cpp), str(build / "raycast.cpp"),
+        "-o", str(build / name),
+    ], check=True)
 
 
 def main():
@@ -77,15 +104,8 @@ def main():
     (build / "plan_env").mkdir(parents=True, exist_ok=True)
     (build / "plan_env/raycast.h").write_text(blob("include/plan_env/raycast.h"))
     (build / "raycast.cpp").write_text(blob("src/raycast.cpp"))
-    cpp = build / "reference.cpp"
-    cpp.write_text(translation)
-    binary = build / "reference"
-    subprocess.run([
-        "c++", "-std=c++17", "-O2", "-ffp-contract=off", "-fsigned-char",
-        "-I" + str(args.eigen), "-I" + str(build), str(cpp), str(build / "raycast.cpp"),
-        "-o", str(binary),
-    ], check=True)
-    print(binary)
+    compile_reference(build, args.eigen, "reference", translation)
+    compile_reference(build, args.eigen, "reference-boundaries", boundary_reference(translation))
 
 
 if __name__ == "__main__":

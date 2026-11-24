@@ -325,11 +325,17 @@ fn adopt(completion: Completion, fsm: &mut ReplanFsm, now: f64, measured: Option
             .last()
             .and_then(|bucket| bucket.last())
             .is_none_or(|(t, _)| *t <= elapsed)
-        || local.points_to_check.iter().flatten().any(|(t, p)| {
-            *t >= elapsed
-                && (fsm.manager.map().index_of(*p).is_none()
-                    || fsm.manager.map().is_occupied_inflated(*p))
-        })
+        || local
+            .first_blocked_chord(
+                fsm.manager.map(),
+                elapsed,
+                local
+                    .points_to_check
+                    .iter()
+                    .flatten()
+                    .filter(|(t, _)| *t >= elapsed),
+            )
+            .is_some()
     {
         return false;
     }

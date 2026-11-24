@@ -39,6 +39,7 @@ def test_default_blueprint_only_selects_registered_observations():
         "planner/loop_hz", "planner/fsm_hz", "planner/fsm_timing_ms",
         "planner/replan_submitted_hz", "planner/replan_hz", "planner/replan_ms",
         "traj/sample_hz", "traj/reference_hz", "traj/timing_ms",
+        "map/frame_ms", "map/update_ms", "map/fusion_ms", "map/work",
     } <= selected
     assert {"cameras/down", "landing/target", "landing/quality", "fc/debug/precision"} <= selected
 

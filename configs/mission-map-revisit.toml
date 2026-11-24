@@ -1,0 +1,14 @@
+# Revisit the same lane from opposite headings and cross the rolling window in both axes.
+altitude = 1.7
+hover_seconds = 2
+precision_land = false
+return_offset = [0.12, -0.08]
+waypoints = [
+  { offset = [3, 0, 1.7], arrival = "stop" },
+  { offset = [8, 0, 1.7], arrival = "stop" },
+  { offset = [3, 0, 1.7], arrival = "stop" },
+  { offset = [3, 2, 1.7], arrival = "stop" },
+  { offset = [8, 2, 1.7], arrival = "stop" },
+  { offset = [8, 0, 1.7], arrival = "stop" },
+  { offset = [3, 0, 1.7], arrival = "stop" },
+]

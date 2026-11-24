@@ -6,7 +6,7 @@ use std::time::Duration;
 use firefly_error::{Error, ErrorKind, Result};
 use firefly_map::GridMap;
 use firefly_pubsub::node::create_node;
-use firefly_pubsub::viz::{VOXELS_MAX, VizPublisher, kind};
+use firefly_pubsub::viz::{VOXELS_MAX, VoxelPublisher, kind};
 use nalgebra::Vector3;
 
 pub(super) const VOXEL_RESYNC_TICKS: usize = 50;
@@ -40,7 +40,7 @@ impl DisplayWorker {
             .spawn(move || {
                 let result = (|| -> Result<()> {
                     let node = create_node()?;
-                    let mut renderer = Renderer::new(VizPublisher::with_voxels(&node)?);
+                    let mut renderer = Renderer::new(VoxelPublisher::new(&node)?);
                     let _ = ready.send(Ok(()));
                     loop {
                         let request = {
@@ -135,7 +135,7 @@ fn internal(message: impl Into<String>) -> Error {
 }
 
 pub(super) struct Renderer {
-    viz_pub: VizPublisher,
+    viz_pub: VoxelPublisher,
     voxel_state: HashMap<String, HashSet<[i32; 3]>>,
     voxel_geometry: HashMap<String, ([f32; 3], [f32; 3])>,
     voxel_current: HashSet<[i32; 3]>,
@@ -145,7 +145,7 @@ pub(super) struct Renderer {
 }
 
 impl Renderer {
-    fn new(publisher: VizPublisher) -> Self {
+    fn new(publisher: VoxelPublisher) -> Self {
         Self {
             viz_pub: publisher,
             voxel_state: HashMap::new(),
@@ -386,7 +386,7 @@ mod tests {
     fn periodic_full_refresh_updates_geometry_before_delta_resumes() {
         let node = create_node().unwrap();
         let subscriber = subscribe(&node);
-        let mut renderer = Renderer::new(VizPublisher::with_voxels(&node).unwrap());
+        let mut renderer = Renderer::new(VoxelPublisher::new(&node).unwrap());
         for (i, (origin, force, expected)) in [
             ([0.; 3], false, kind::VOXELS),
             ([2.; 3], true, kind::VOXELS),
@@ -421,12 +421,8 @@ mod tests {
             .with_obstacles_inflation(0.)
             .build()
             .unwrap();
-        map.set_collision_snapshot(firefly_map::CollisionSnapshot::from_runs(
-            [0; 3],
-            [6; 3],
-            [([2; 3], [3; 3])],
-        ))
-        .unwrap();
+        map.set_state([2; 3], firefly_map::VoxelState::Occupied);
+        map.inflate_obstacles();
         let worker = DisplayWorker::start().unwrap();
         worker
             .submit(Request {

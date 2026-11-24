@@ -20,9 +20,40 @@ use firefly_pubsub::{
 #[derive(Default)]
 struct Shared {
     input: StateInput,
+    publisher: Option<u128>,
     history: VecDeque<OdomMessage>,
     trace: TraceContext,
     error: Option<Error>,
+}
+
+impl Shared {
+    fn observe(
+        &mut self,
+        message: &OdomMessage,
+        publisher: u128,
+        trace: TraceContext,
+        now: Instant,
+    ) {
+        // A replacement odometry writer can start at another world origin with a later clock.
+        if self.publisher.is_some_and(|id| id != publisher) {
+            self.history.clear();
+            self.input.stop();
+            return;
+        }
+        if self.input.observe(message, now) {
+            self.publisher = Some(publisher);
+            self.history.push_back(*message);
+            while self.history.len() > 512
+                || self
+                    .history
+                    .front()
+                    .is_some_and(|old| message.timestamp - old.timestamp > 2.)
+            {
+                self.history.pop_front();
+            }
+            self.trace = trace;
+        }
+    }
 }
 
 /// 同一进程内按测量时间排列的有界里程计历史。
@@ -87,18 +118,12 @@ impl OdometryReceiver {
                             let mut state = state
                                 .lock()
                                 .map_err(|_| internal("odometry state poisoned"))?;
-                            if state.input.observe(&message, Instant::now()) {
-                                state.history.push_back(*message);
-                                while state.history.len() > 512
-                                    || state
-                                        .history
-                                        .front()
-                                        .is_some_and(|old| message.timestamp - old.timestamp > 2.)
-                                {
-                                    state.history.pop_front();
-                                }
-                                state.trace = trace;
-                            }
+                            state.observe(
+                                &message,
+                                message.header().publisher_id().value(),
+                                trace,
+                                Instant::now(),
+                            );
                         }
                         state
                             .lock()
@@ -186,6 +211,25 @@ fn internal(message: impl Into<String>) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changing_writer_latches_stop_even_when_measurement_time_advances() {
+        let mut state = Shared::default();
+        let mut message = OdomMessage {
+            timestamp: 1.,
+            is_initialized: true,
+            ..Default::default()
+        };
+        let now = Instant::now();
+        state.observe(&message, 10, TraceContext::default(), now);
+        assert_eq!(state.history.len(), 1);
+        message.timestamp = 2.;
+        state.observe(&message, 11, TraceContext::default(), now);
+        assert!(state.input.stopped());
+        assert!(state.history.is_empty());
+        state.observe(&message, 10, TraceContext::default(), now);
+        assert!(state.input.current(now).is_none());
+    }
 
     #[test]
     fn expired_input_retires_buffered_history() {

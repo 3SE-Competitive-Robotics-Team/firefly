@@ -59,6 +59,27 @@ pub struct LocalTraj {
     pub traj_id: u32,
 }
 
+impl LocalTraj {
+    /// Earliest possible contact time on the chords spanning the supplied future checkpoints.
+    pub(crate) fn first_blocked_chord<'a>(
+        &self,
+        map: &GridMap,
+        from: f64,
+        points: impl Iterator<Item = &'a crate::obstacles::SamplePoint>,
+    ) -> Option<f64> {
+        let mut t0 = from.max(0.);
+        let mut p0 = self.traj.eval(t0).position;
+        for &(t, p) in points {
+            if !map.segment_is_clear(p0, p, firefly_map::SegmentRule::KnownObstacles) {
+                return Some(t0);
+            }
+            t0 = t;
+            p0 = p;
+        }
+        None
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct SwarmTraj {
     pub(crate) traj: Trajectory,
@@ -744,22 +765,14 @@ impl PlannerManager {
             t_cur,
             self.touch_goal || self.motion_context.is_some(),
         )?;
-        let map = self.planner.map_ref();
-        for (i, bucket) in local
+        let points = local
             .points_to_check
             .iter()
-            .enumerate()
             .take(scan_end)
             .skip(i_start)
-        {
-            let skip = if i == i_start { j_start } else { 0 };
-            for (t, p) in bucket.iter().skip(skip) {
-                if map.index_of(*p).is_none() || map.is_occupied_inflated(*p) {
-                    return Some(*t);
-                }
-            }
-        }
-        None
+            .flatten()
+            .skip(j_start);
+        local.first_blocked_chord(self.planner.map_ref(), t_cur, points)
     }
 
     /// FSM 层 swarm 预测检查（官方 `ego_replan_fsm.cpp` checkCollisionCallback

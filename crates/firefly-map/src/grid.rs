@@ -1,16 +1,20 @@
-//! 已膨胀的 EGO 碰撞快照使用零追加膨胀；显式先验在加载时预先膨胀。
+//! 固定场地在加载时计算净距，深度层提供已膨胀的碰撞快照。查询合并两层的阻挡。
 //! 窗口坐标随窗口下界平移，跨平移簿记使用世界锚定的全局索引。
 //! 未知、自由与窗口外均采用乐观查询；世界系虚拟墙例外。
 
-mod buffer;
+pub(crate) mod buffer;
 mod builder;
 mod inflation;
 mod occupancy;
+mod segment;
 #[cfg(test)]
 mod snapshot_tests;
+mod voxel_box;
 mod window;
 
 pub use builder::GridMapBuilder;
+pub use segment::SegmentRule;
+pub use voxel_box::VoxelBox;
 
 use buffer::Buffer;
 use std::collections::HashSet;
@@ -57,27 +61,18 @@ pub struct GridMap {
     /// 膨胀缓冲尺寸 = `dims` + 2×`inf_grid`（官方 `ringbuffer_inf_size3i_`）：比占据
     /// 窗口每侧多 `inf_grid` 格余量，窗口边缘障碍的膨胀计数有处可写。
     inf_dims: [usize; 3],
-    /// 局部更新半径（体素数，官方 `local_update_range3i_`），窗口半宽。
-    local_update_range3i: [i64; 3],
-    /// 当前窗口下界（全局索引，含端点；官方 `ringbuffer_lowbound3i_`）。
-    low: [i64; 3],
-    /// 当前窗口上界（全局索引，含端点；官方 `ringbuffer_upbound3i_`）。
-    up: [i64; 3],
-    /// 膨胀缓冲窗口下界（官方 `ringbuffer_inf_lowbound3i_`，= low − `inf_grid`）。
-    inf_low: [i64; 3],
-    /// 膨胀缓冲窗口上界（官方 `ringbuffer_inf_upbound3i_`，= up + `inf_grid`）。
-    inf_up: [i64; 3],
-    /// 环形寻址原点（官方 `ringbuffer_origin3i_`），恒落在 `[low, up]` 内；
-    /// 存储地址 = `(全局索引 − origin) % dims`。
+    bounds: voxel_box::VoxelBox,
+    inf_bounds: voxel_box::VoxelBox,
+    /// 当前窗口中映射到环形缓冲零槽的全局体素索引。
     ring_origin: [i64; 3],
     /// 膨胀缓冲环形寻址原点（官方 `ringbuffer_inf_origin3i_`）。
     inf_ring_origin: [i64; 3],
-    /// 上次窗口中心（官方 `center_last3i_`，平移方向判据）。
-    center_last: [i64; 3],
     /// 局部快照派生的二值占据；不累计传感器概率。
     occupancy: Buffer<bool>,
     /// Already-inflated sensor observations, immutable and shared with planner workers.
     collision: Option<crate::CollisionSnapshot>,
+    observations: Option<crate::ObservedSpace>,
+    field: Option<crate::field::FixedField>,
     /// 世界锚定的场地先验；自由快照与动态障碍移除不能清除。
     prior: Arc<HashSet<[i64; 3]>>,
     /// 膨胀计数缓冲（对照官方 `occupancy_buffer_inflate_`）：障碍体素自身 `±GRID_MAP_OBS_FLAG`，周围 `inf_grid` 格内 `±1`；`>0` 即膨胀。

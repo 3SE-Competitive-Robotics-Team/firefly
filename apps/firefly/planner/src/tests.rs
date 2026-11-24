@@ -69,9 +69,10 @@ fn local_depth_source_reaches_planner_without_an_occupancy_publisher() {
             obstacle_clearance: 0.25,
             ..Default::default()
         },
-        config::MappingOptions {
+        &config::MappingOptions {
             resolution: 0.25,
             range: [2.; 3],
+            field: None,
             depth: config::DepthOptions {
                 translation: [0.; 3],
                 rotation: [0., 0., 0., 1.],
@@ -122,7 +123,7 @@ fn local_depth_source_reaches_planner_without_an_occupancy_publisher() {
             std::thread::sleep(Duration::from_millis(20));
             app.poll_sensors().unwrap();
             if let Some(nav) = app.state_input.odometry()
-                && app.synchronize_map(&nav).unwrap() == MapStatus::Ready
+                && app.synchronize_map(&nav) == MapStatus::Ready
                 && app
                     .fsm
                     .manager()
@@ -148,15 +149,47 @@ fn local_depth_source_reaches_planner_without_an_occupancy_publisher() {
         std::thread::sleep(Duration::from_millis(20));
         app.poll_odometry().unwrap();
         let nav = app.state_input.odometry().unwrap();
-        if app
-            .map_input
-            .status(&nav, Instant::now(), Duration::from_secs(1))
-            != MapStatus::Ready
-        {
+        if app.synchronize_map(&nav) != MapStatus::Ready {
             break;
         }
     }
     drop(app); // Both receiving workers must join on ordinary teardown.
+}
+
+#[test]
+#[ignore = "requires exclusive planner IPC topics"]
+fn replacement_odometry_writer_retires_the_planner_session() {
+    let node = create_node().unwrap();
+    let first = Publisher::<OdomMessage>::with_topic(&node, ODOM_TOPIC).unwrap();
+    let receiver = OdometryReceiver::start().unwrap();
+    let start = Instant::now();
+    loop {
+        publish_odometry(&first, 1., 0.);
+        if receiver.snapshot().unwrap().0.odometry().is_some() {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(1));
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    drop(first);
+    let replacement = Publisher::<OdomMessage>::with_topic(&node, ODOM_TOPIC).unwrap();
+    let start = Instant::now();
+    loop {
+        publish_odometry(&replacement, 2., 30.);
+        if receiver.snapshot().unwrap().0.stopped() {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_millis(250));
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(start.elapsed() < Duration::from_millis(250));
+    assert!(
+        receiver
+            .history()
+            .read(std::collections::VecDeque::len)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -190,7 +223,7 @@ fn safety_callback_applies_new_obstacles_and_deletions_without_exec_tick() {
     let odometry = Publisher::<OdomMessage>::with_topic(&node, ODOM_TOPIC).unwrap();
     let mut app = App::new(
         PlannerConfig::default(),
-        config::MappingOptions {
+        &config::MappingOptions {
             resolution: 0.5,
             range: [4.; 3],
             ..Default::default()
@@ -208,26 +241,28 @@ fn safety_callback_applies_new_obstacles_and_deletions_without_exec_tick() {
         std::thread::sleep(Duration::from_millis(2));
     }
     let snapshot = |sequence, cells: Vec<Bounds>| LocalSnapshot {
-        observed: firefly_map::ObservedSpace::from_buffer(
-            0.5,
-            [-10; 3],
-            [20; 3],
-            [-10; 3],
-            &[true; 8000],
-        ),
         sequence,
-        collision: firefly_map::CollisionSnapshot::from_runs(
-            [-10; 3],
-            [20; 3],
-            cells
-                .iter()
-                .map(|cell: &Bounds| cell.voxel_bounds(Vector3::zeros(), 0.5)),
-        ),
-        timestamp: 1.,
+        last_observed_at: 1.,
         fused_at: Instant::now(),
-        bounds: Bounds {
-            min: [-5.; 3],
-            max: [5.; 3],
+        map: firefly_map::depth::DepthSnapshot {
+            measured_at: 1.,
+            observed: firefly_map::ObservedSpace::from_voxels(
+                0.5,
+                firefly_map::VoxelBox::centered([0; 3], [20; 3]).unwrap(),
+                [],
+            )
+            .unwrap(),
+            collision: firefly_map::CollisionSnapshot::from_runs(
+                [-10; 3],
+                [20; 3],
+                cells
+                    .iter()
+                    .map(|cell: &Bounds| cell.voxel_bounds(Vector3::zeros(), 0.5)),
+            ),
+            bounds: Bounds {
+                min: [-5.; 3],
+                max: [5.; 3],
+            },
         },
     };
     app.map_input.observe_local(snapshot(1, vec![])).unwrap();
@@ -260,7 +295,7 @@ fn safety_callback_applies_new_obstacles_and_deletions_without_exec_tick() {
     }
     assert!(app.fsm.manager().local().is_some());
     let mut uncovered = snapshot(4, vec![]);
-    uncovered.bounds = Bounds {
+    uncovered.map.bounds = Bounds {
         min: [-0.1; 3],
         max: [0.1; 3],
     };

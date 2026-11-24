@@ -99,12 +99,12 @@
 | [crates/firefly-calibration/src/spline/rd_spline.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-calibration/src/spline/rd_spline.rs) | 1, 116 |
 | [crates/firefly-calibration/src/spline/spline_common.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-calibration/src/spline/spline_common.rs) | 1, 117 |
 | [crates/firefly-cost/src/integrated.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-cost/src/integrated.rs) | 138 |
-| [crates/firefly-ego-map/src/config.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-ego-map/src/config.rs) | 39 |
-| [crates/firefly-ego-map/src/grid.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-ego-map/src/grid.rs) | 39 |
-| [crates/firefly-ego-map/src/grid/window.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-ego-map/src/grid/window.rs) | 39 |
-| [crates/firefly-ego-map/src/lib.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-ego-map/src/lib.rs) | 39, 118, 119 |
-| [crates/firefly-ego-map/src/raycast.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-ego-map/src/raycast.rs) | 39 |
-| [crates/firefly-ego-map/tests/reference/harness.cpp](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-ego-map/tests/reference/harness.cpp) | 40 |
+| [crates/firefly-map/src/depth/config.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-map/src/depth/config.rs) | 39 |
+| [crates/firefly-map/src/depth/grid.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-map/src/depth/grid.rs) | 39 |
+| [crates/firefly-map/src/depth/grid/window.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-map/src/depth/grid/window.rs) | 39 |
+| [crates/firefly-map/src/depth.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-map/src/depth.rs) | 39, 118, 119 |
+| [crates/firefly-map/src/depth/raycast.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-map/src/depth/raycast.rs) | 39 |
+| [crates/firefly-map/tests/reference/harness.cpp](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-map/tests/reference/harness.cpp) | 40 |
 | [crates/firefly-flight/src/lib.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-flight/src/lib.rs) | 120 |
 | [crates/firefly-flight/src/multirotor/allocation.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-flight/src/multirotor/allocation.rs) | 121 |
 | [crates/firefly-flight/src/multirotor/attitude_control_math.rs](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-flight/src/multirotor/attitude_control_math.rs) | 123 |

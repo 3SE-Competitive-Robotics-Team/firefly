@@ -1,7 +1,8 @@
 //! Coordinate bounded position/yaw commands and a stopping tail on one time axis.
-use firefly_map::{GridMap, ObservedSpace};
+use firefly_map::{GridMap, SegmentRule};
 use firefly_trajectory::{Endpoint, MincoBuilder, SolverOrder, Trajectory};
 use nalgebra::{DMatrix, DVector, Point3, Vector3};
+use std::time::Duration;
 
 use crate::{Planner, PlannerConfig};
 
@@ -12,7 +13,8 @@ pub const MAX_YAW_ACCELERATION: f64 = 5. * std::f64::consts::PI;
 #[derive(Clone)]
 pub struct MotionContext {
     /// Coverage diagnostics only; execution uses the same optimistic policy as EGO search.
-    pub observed: ObservedSpace,
+    pub measured_at: f64,
+    pub evidence_max_age: Duration,
     pub measured_yaw: f64,
     /// Half of the calibrated horizontal field of view, in radians.
     pub view_half_angle: f64,
@@ -92,8 +94,7 @@ fn append(first: &Trajectory, second: &Trajectory) -> Option<Trajectory> {
     .ok()
 }
 
-/// Discrete centerline check at at most half a voxel of travel and at least 100 Hz.
-/// Inflation covers known obstacles; continuous swept-volume validation is separate.
+/// Check every voxel crossed by chords between trajectory samples at up to 10 ms intervals.
 /// Unknown space remains traversable, matching the position optimizer and EGO map queries.
 pub(crate) fn executable(
     map: &GridMap,
@@ -103,10 +104,17 @@ pub(crate) fn executable(
 ) -> bool {
     let dt = (map.resolution() / (2. * config.max_velocity)).min(0.01);
     let duration = trajectory.duration();
-    if !dt.is_finite() || dt <= 0. || !duration.is_finite() || duration / dt > 20_000. {
+    if !dt.is_finite()
+        || dt <= 0.
+        || !from.is_finite()
+        || duration < 0.
+        || !duration.is_finite()
+        || duration / dt > 20_000.
+    {
         return false;
     }
     let count = ((duration - from.max(0.)).max(0.) / dt).ceil() as usize;
+    let mut previous = trajectory.eval(from.clamp(0., duration)).position;
     (0..=count).all(|i| {
         let sample = trajectory.eval((from.max(0.) + i as f64 * dt).min(duration));
         let p = sample.position;
@@ -114,8 +122,11 @@ pub(crate) fn executable(
             .chain(sample.velocity.iter())
             .chain(sample.acceleration.iter())
             .all(|x| x.is_finite())
-            && map.index_of(p).is_some()
-            && !map.is_occupied_inflated(p)
+            && map.segment_is_clear(
+                std::mem::replace(&mut previous, p),
+                p,
+                SegmentRule::KnownObstacles,
+            )
             && sample.velocity.norm() <= config.max_velocity + 1e-6
             && sample.acceleration.norm() <= config.max_acceleration + 1e-6
             && sample.jerk.norm() <= config.max_jerk + 1e-6
@@ -310,13 +321,15 @@ fn log_proposal(
     turn: bool,
 ) {
     if log::log_enabled!(target: "planner-motion", log::Level::Debug) {
+        let mut previous = proposed.eval(0.).position;
         let blocked = (0..=200).find_map(|i| {
             let t = proposed.duration().min(horizon_seconds) * f64::from(i) / 200.;
             let sample = proposed.eval(t);
             let p = sample.position;
+            let start = std::mem::replace(&mut previous, p);
             let reason = if map.index_of(p).is_none() {
                 "window"
-            } else if map.is_occupied_inflated(p) {
+            } else if !map.segment_is_clear(start, p, SegmentRule::KnownObstacles) {
                 "occupied"
             } else if sample.velocity.norm() > config.max_velocity + 1e-6 {
                 "velocity"
@@ -329,10 +342,25 @@ fn log_proposal(
             };
             Some((t, p, reason))
         });
+        let mut previous = proposed.eval(0.).position;
         let first_unobserved = (0..=200).find_map(|i| {
             let t = proposed.duration().min(horizon_seconds) * f64::from(i) / 200.;
             let p = proposed.eval(t).position;
-            (!context.observed.is_free(p)).then_some((t, p))
+            (!map.segment_is_clear(
+                std::mem::replace(&mut previous, p),
+                p,
+                SegmentRule::RecentlyFree {
+                    measured_at: context.measured_at,
+                    max_age: context.evidence_max_age,
+                },
+            ))
+            .then(|| {
+                (
+                    t,
+                    p,
+                    map.cell_at(p, context.measured_at, context.evidence_max_age),
+                )
+            })
         });
         log::debug!(target: "planner-motion", "proposal start={:?} yaw={} desired={} turn={turn} first_block={blocked:?} first_unobserved={first_unobserved:?}", proposed.eval(0.).position, context.measured_yaw, desired);
     }
@@ -420,15 +448,23 @@ mod tests {
     use firefly_map::GridMapBuilder;
 
     fn scene(free_x: f64) -> (GridMap, MotionContext) {
-        let map = GridMapBuilder::new(0.1, [100, 20, 20])
+        let mut map = GridMapBuilder::new(0.1, [100, 20, 20])
             .with_obstacles_inflation(0.)
             .build()
             .unwrap();
-        let free: Vec<_> = (0..40_000)
-            .map(|i| f64::from(i % 100) * 0.1 < free_x)
-            .collect();
+        let free = (0..100).filter(|&x| x as f64 * 0.1 < free_x).flat_map(|x| {
+            (0..20).flat_map(move |y| {
+                (0..20).map(move |z| ([x, y, z], firefly_map::Evidence::Free(0.)))
+            })
+        });
+        let bounds = firefly_map::VoxelBox::centered([50, 10, 10], [100, 20, 20]).unwrap();
+        map.set_online_snapshot(
+            firefly_map::CollisionSnapshot::from_runs([0; 3], [100, 20, 20], []),
+            firefly_map::ObservedSpace::from_voxels(0.1, bounds, free).unwrap(),
+        );
         let context = MotionContext {
-            observed: ObservedSpace::from_buffer(0.1, [0; 3], [100, 20, 20], [0; 3], &free),
+            measured_at: 0.,
+            evidence_max_age: Duration::from_secs(1),
             measured_yaw: 0.,
             view_half_angle: 0.6,
         };

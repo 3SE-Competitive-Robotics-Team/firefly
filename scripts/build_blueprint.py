@@ -1,4 +1,4 @@
-"""Build the shared firefly Rerun layout with visible down-camera landing evidence."""
+"""Build the shared Firefly Rerun layout."""
 import argparse
 from pathlib import Path
 
@@ -84,6 +84,24 @@ def build():
         chart("Traj callback / period · ms", "/traj/timing_ms", overrides={
             "/traj/timing_ms": lines(visible=[True, False, False, True])}), name="Traj",
     )
+    mapping = bp.Vertical(
+        bp.Horizontal(
+            chart("Frame latency · ms", "/map/frame_ms", overrides={
+                "/map/frame_ms": lines(names=["Pair wait", "Worker update"])}),
+            chart("Map update · ms", "/map/update_ms", overrides={
+                "/map/update_ms": lines(names=["Integration", "Maintenance", "Snapshot", "Handoff"],
+                                        visible=[True, True, False, False])}),
+            chart("Snapshot / handoff · ms", "/map/update_ms", overrides={
+                "/map/update_ms": lines(names=["Integration", "Maintenance", "Snapshot", "Handoff"],
+                                        visible=[False, False, True, True])}),
+        ),
+        bp.Horizontal(
+            chart("Fusion stages · ms", "/map/fusion_ms", overrides={
+                "/map/fusion_ms": lines(names=["Projection", "Window", "Raycast", "Inflation"])}),
+            chart("Work per frame · count", "/map/work", overrides={
+                "/map/work": lines(names=["Projected rays", "Voted voxels", "Cleared voxels"])}),
+        ), name="Map",
+    )
     landing = bp.Horizontal(
         chart("FC mode / precision stage", "/fc/debug",
               contents=["/fc/debug/state", "/fc/debug/precision"]),
@@ -95,7 +113,7 @@ def build():
     return bp.Blueprint(
         bp.Vertical(
             cards, bp.Horizontal(scene, cameras, column_shares=[.65, .35]),
-            bp.Tabs(landing, tracking, timing, estimator, planner, trajectory,
+            bp.Tabs(landing, tracking, timing, estimator, planner, mapping, trajectory,
                     bp.TextLogView(name="Logs", origin="/logs"), active_tab=0),
             row_shares=[.08, .57, .35],
         ),

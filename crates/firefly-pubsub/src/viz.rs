@@ -240,14 +240,44 @@ pub trait VizPayload {
     ) -> Result<crate::trace::TraceContext, firefly_error::Error>;
 }
 
-/// 小型诊断发布器；只有显式启用体素的 planner 分配大载荷发布缓冲。
+/// Spatial and numeric diagnostics emitted on the same thread.
 pub struct VizPublisher {
     geometry: crate::publish::Publisher<VizMessage>,
-    scalars: crate::publish::Publisher<ScalarMessage>,
-    voxels: Option<crate::publish::Publisher<VoxelMessage>>,
-    voxel_sequence: Cell<u64>,
+    scalars: ScalarPublisher,
     geometry_sequence: Cell<u64>,
-    scalar_sequence: Cell<u64>,
+}
+
+/// One sequenced scalar stream on the existing diagnostic topic.
+pub struct ScalarPublisher {
+    port: crate::publish::Publisher<ScalarMessage>,
+    sequence: Cell<u64>,
+}
+
+impl ScalarPublisher {
+    /// # Errors
+    /// Returns an error if the scalar port cannot be opened.
+    pub fn new(node: &crate::node::IpcNode) -> Result<Self, firefly_error::Error> {
+        Ok(Self {
+            port: crate::publish::Publisher::with_topic_buffer_publishers(
+                node,
+                SCALAR_TOPIC,
+                Some(SCALAR_BUFFER_SIZE),
+                Some(VIZ_MAX_PUBLISHERS),
+            )?,
+            sequence: Cell::new(0),
+        })
+    }
+
+    /// # Errors
+    /// Returns the IPC send error. Sequence gaps remain visible to the recorder.
+    pub fn publish(
+        &self,
+        mut msg: ScalarMessage,
+    ) -> Result<crate::trace::TraceContext, firefly_error::Error> {
+        msg.sequence = self.sequence.get();
+        self.sequence.set(msg.sequence.wrapping_add(1));
+        self.port.publish(msg)
+    }
 }
 
 impl VizPublisher {
@@ -262,30 +292,45 @@ impl VizPublisher {
                 Some(VIZ_BUFFER_SIZE),
                 Some(VIZ_MAX_PUBLISHERS),
             )?,
-            scalars: Publisher::with_topic_buffer_publishers(
-                node,
-                SCALAR_TOPIC,
-                Some(SCALAR_BUFFER_SIZE),
-                Some(VIZ_MAX_PUBLISHERS),
-            )?,
-            voxels: None,
-            voxel_sequence: Cell::new(0),
+            scalars: ScalarPublisher::new(node)?,
             geometry_sequence: Cell::new(0),
-            scalar_sequence: Cell::new(0),
         })
     }
 
+    /// Publish a registered visualization payload.
+    /// # Errors
+    /// IPC borrowing or sending failed.
+    pub fn publish(
+        &self,
+        msg: impl VizPayload,
+    ) -> Result<crate::trace::TraceContext, firefly_error::Error> {
+        let result = msg.publish_to(self);
+        if let Err(error) = &result {
+            log::warn!("可视化 IPC 发布失败: {error}");
+        }
+        result
+    }
+}
+
+/// Dedicated sequenced voxel port for the display worker.
+pub struct VoxelPublisher {
+    port: crate::publish::Publisher<VoxelMessage>,
+    sequence: Cell<u64>,
+}
+
+impl VoxelPublisher {
     /// # Errors
     /// 任一服务或发布端创建失败。
-    pub fn with_voxels(node: &crate::node::IpcNode) -> Result<Self, firefly_error::Error> {
-        let mut publisher = Self::new(node)?;
-        publisher.voxels = Some(crate::publish::Publisher::with_topic_buffer_publishers(
-            node,
-            VOXEL_TOPIC,
-            Some(VOXEL_BUFFER_SIZE),
-            Some(1),
-        )?);
-        Ok(publisher)
+    pub fn new(node: &crate::node::IpcNode) -> Result<Self, firefly_error::Error> {
+        Ok(Self {
+            port: crate::publish::Publisher::with_topic_buffer_publishers(
+                node,
+                VOXEL_TOPIC,
+                Some(VOXEL_BUFFER_SIZE),
+                Some(1),
+            )?,
+            sequence: Cell::new(0),
+        })
     }
 
     /// Fill a voxel update in its shared slot and assign its publisher sequence.
@@ -298,32 +343,15 @@ impl VizPublisher {
         entity: &str,
         fill: impl FnOnce(&mut VoxelMessage),
     ) -> Result<crate::trace::TraceContext, firefly_error::Error> {
-        let voxels = self.voxels.as_ref().ok_or_else(|| {
-            firefly_error::Error::new(firefly_error::ErrorKind::InvalidArgument, "体素通道未启用")
-        })?;
-        let sequence = self.voxel_sequence.get();
-        self.voxel_sequence.set(sequence.wrapping_add(1));
-        let result = voxels.publish_with(|msg| {
+        let sequence = self.sequence.get();
+        self.sequence.set(sequence.wrapping_add(1));
+        let result = self.port.publish_with(|msg| {
             (msg.entity, msg.entity_len) = entity_bytes(entity);
             msg.kind = kind;
             msg.timestamp = timestamp;
             fill(msg);
             msg.sequence = sequence;
         });
-        if let Err(error) = &result {
-            log::warn!("可视化 IPC 发布失败: {error}");
-        }
-        result
-    }
-
-    /// 发布失败记入结构化日志；诊断链路不得阻塞算法。
-    /// # Errors
-    /// IPC 借出或发送失败。
-    pub fn publish(
-        &self,
-        msg: impl VizPayload,
-    ) -> Result<crate::trace::TraceContext, firefly_error::Error> {
-        let result = msg.publish_to(self);
         if let Err(error) = &result {
             log::warn!("可视化 IPC 发布失败: {error}");
         }
@@ -345,25 +373,10 @@ impl VizPayload for VizMessage {
 }
 impl VizPayload for ScalarMessage {
     fn publish_to(
-        mut self,
+        self,
         publisher: &VizPublisher,
     ) -> Result<crate::trace::TraceContext, firefly_error::Error> {
-        self.sequence = publisher.scalar_sequence.get();
-        publisher.scalar_sequence.set(self.sequence.wrapping_add(1));
         publisher.scalars.publish(self)
-    }
-}
-impl VizPayload for VoxelMessage {
-    fn publish_to(
-        mut self,
-        publisher: &VizPublisher,
-    ) -> Result<crate::trace::TraceContext, firefly_error::Error> {
-        let voxels = publisher.voxels.as_ref().ok_or_else(|| {
-            firefly_error::Error::new(firefly_error::ErrorKind::InvalidArgument, "体素通道未启用")
-        })?;
-        self.sequence = publisher.voxel_sequence.get();
-        publisher.voxel_sequence.set(self.sequence.wrapping_add(1));
-        voxels.publish(self)
     }
 }
 

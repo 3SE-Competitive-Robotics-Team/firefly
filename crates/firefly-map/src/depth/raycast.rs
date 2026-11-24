@@ -1,7 +1,7 @@
 //! `raycast.cpp`: integer-cell direction, strict tie comparisons, end cell excluded.
 use nalgebra::Vector3;
 
-pub(crate) struct RayCaster {
+pub(super) struct RayCaster {
     cell: Vector3<i32>,
     end: Vector3<i32>,
     step: Vector3<i32>,
@@ -16,7 +16,7 @@ fn intbound(s: f64, ds: f64) -> f64 {
     (1. - s) / ds
 }
 impl RayCaster {
-    pub fn new(start: Vector3<f64>, end: Vector3<f64>) -> Self {
+    pub(super) fn new(start: Vector3<f64>, end: Vector3<f64>) -> Self {
         let cell = start.map(|v| v.floor() as i32);
         let end = end.map(|v| v.floor() as i32);
         let direction = end - cell;

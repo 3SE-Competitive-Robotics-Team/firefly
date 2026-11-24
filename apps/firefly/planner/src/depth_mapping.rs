@@ -11,8 +11,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use firefly_ego_map::{DepthImage, GridMap};
 use firefly_error::{Error, ErrorKind, Result};
+use firefly_map::depth::{DepthImage, DepthMapper, FrameStats, FrameUpdate};
 use firefly_odometry::{OdometryHistory, PoseBracket};
 use firefly_pubsub::{
     camera::{DEPTH_TOPIC, DepthImageMessage, IMAGE_HEIGHT, IMAGE_WIDTH},
@@ -20,18 +20,15 @@ use firefly_pubsub::{
     odom::OdomMessage,
     subscriber::Subscriber,
     trace::TraceContext,
+    viz::{ScalarMessage, ScalarPublisher},
 };
 use nalgebra::Isometry3;
 
-use crate::{
-    config::DepthOptions,
-    map_input::{Bounds, LocalSnapshot},
-};
+use crate::{config::DepthOptions, map_input::LocalSnapshot};
 
 const OCCUPANCY_PERIOD: Duration = Duration::from_millis(32);
 const FADING_PERIOD: Duration = Duration::from_millis(500);
 const MAX_PENDING_DEPTHS: usize = 8;
-const MAX_COLLISION_RUNS: usize = 1_000_000;
 
 #[derive(Default)]
 struct Shared {
@@ -122,6 +119,11 @@ fn run_mapping(
 ) -> Result<()> {
     let node = create_node()?;
     let subscriber = Subscriber::<DepthImageMessage>::with_topic(&node, DEPTH_TOPIC)?;
+    let diagnostics = ScalarPublisher::new(&node)
+        .inspect_err(|e| {
+            log::warn!("map timing publisher unavailable: {e}");
+        })
+        .ok();
     let _ = ready.send(Ok(()));
     let epoch = Instant::now();
     let mut next_occupancy = epoch + OCCUPANCY_PERIOD;
@@ -151,30 +153,43 @@ fn run_mapping(
         }
 
         let now = Instant::now();
-        let mut changed = false;
+        let mut timing = UpdateTiming::default();
         if timer_due(&mut next_occupancy, OCCUPANCY_PERIOD, now)
             && let Some(pair) = history
                 .read(|poses| take_pair(&mut pending, poses, now, fusion.options.max_pose_gap))?
         {
-            // The upstream timer treats times below one second as uninitialized.
-            let timer_time = 1. + now.duration_since(epoch).as_secs_f64();
+            let timer_time = now.duration_since(epoch).as_secs_f64();
             if let Some((frame, pose)) =
                 pair.and_then(|(frame, bracket)| Some((frame, bracket.pose()?)))
             {
                 let _span = frame.trace.continue_span("planner-depth-fusion");
-                changed = fusion.integrate(frame, pose, timer_time)?;
-            } else {
-                fusion.map.update_occupancy_callback(timer_time)?;
+                let start = Instant::now();
+                let wait = start - frame.received;
+                if fusion.integrate(frame, pose, timer_time)? {
+                    timing.frame = Some((start, wait));
+                    timing.integrate = start.elapsed();
+                }
             }
-            if fusion.map.odom_depth_timeout() {
+            if fusion.map.timed_out_at(timer_time)? {
                 return Err(invalid("depth/pose fusion timed out; restart planner"));
             }
         }
-        if fusion.options.fading_time > 0. && timer_due(&mut next_fading, FADING_PERIOD, now) {
-            fusion.map.fading_callback();
-            changed = true;
+        let maintenance_due = (fusion.options.fading_time > 0.
+            || fusion.options.occupied_max_age.is_some())
+            && timer_due(&mut next_fading, FADING_PERIOD, now);
+        if maintenance_due {
+            let start = Instant::now();
+            fusion.map.fade();
+            timing.maintenance = start.elapsed();
         }
-        if changed && let Some(snapshot) = fusion.snapshot()? {
+        if timing.frame.is_none() && !maintenance_due {
+            continue;
+        }
+        let start = Instant::now();
+        let snapshot = fusion.snapshot()?;
+        let built = Instant::now();
+        timing.snapshot = built - start;
+        if let Some(snapshot) = snapshot {
             // Drop a superseded large snapshot after releasing the planner's result lock.
             let previous = shared
                 .lock()
@@ -182,9 +197,66 @@ fn run_mapping(
                 .latest
                 .replace(snapshot);
             drop(previous);
+            timing.handoff = built.elapsed();
+        }
+        if let (Some(port), Some(stats)) = (&diagnostics, fusion.map.last_frame()) {
+            timing.publish(port, stats);
         }
     }
     Ok(())
+}
+
+#[derive(Default)]
+struct UpdateTiming {
+    frame: Option<(Instant, Duration)>,
+    integrate: Duration,
+    maintenance: Duration,
+    snapshot: Duration,
+    handoff: Duration,
+}
+
+impl UpdateTiming {
+    fn publish(self, port: &ScalarPublisher, stats: FrameStats) {
+        let finished = Instant::now();
+        let ms = |d: Duration| d.as_secs_f64() * 1000.;
+        let send = |path, values: &[f64]| {
+            let mut msg = ScalarMessage::base(stats.measured_at, path);
+            msg.scalar_count = values.len() as u32;
+            msg.scalars[..values.len()].copy_from_slice(values);
+            if let Err(e) = port.publish(msg) {
+                log::warn!("publishing {path}: {e}");
+            }
+        };
+        send(
+            "map/update_ms",
+            &[
+                ms(self.integrate),
+                ms(self.maintenance),
+                ms(self.snapshot),
+                ms(self.handoff),
+            ],
+        );
+        if let Some((started, wait)) = self.frame {
+            send("map/frame_ms", &[ms(wait), ms(finished - started)]);
+            send(
+                "map/fusion_ms",
+                &[
+                    ms(stats.projection),
+                    ms(stats.window),
+                    ms(stats.raycast),
+                    ms(stats.inflation),
+                ],
+            );
+            send(
+                "map/work",
+                &[
+                    stats.projected_rays as f64,
+                    stats.voted_voxels as f64,
+                    stats.cleared_voxels as f64,
+                ],
+            );
+        }
+    }
 }
 
 /// Keep the original timer phase, coalescing missed ticks instead of replaying a backlog.
@@ -236,7 +308,7 @@ struct DepthFrame {
 impl DepthFrame {
     fn from_message(
         message: &DepthImageMessage,
-        map: &GridMap,
+        map: &DepthMapper,
         scale: f64,
         trace: TraceContext,
     ) -> Result<Self> {
@@ -269,12 +341,7 @@ fn depth_units(metres: f32, scale: f64) -> u16 {
 
 /// Numerical state is private to the mapping worker. Construct before opening IPC.
 pub struct DepthFusion {
-    map: GridMap,
-    collision_resolution: f64,
-    collision_origin: nalgebra::Vector3<f64>,
-    collision_cache: Option<firefly_map::CollisionSnapshot>,
-    observed_cache: Option<firefly_map::ObservedSpace>,
-    cached_revisions: (u64, u64),
+    map: DepthMapper,
     options: DepthOptions,
     last_fused: Option<(f64, Instant)>,
     sequence: u64,
@@ -283,17 +350,8 @@ pub struct DepthFusion {
 impl DepthFusion {
     pub fn new(grid: &firefly_map::GridMap, options: DepthOptions, clearance: f64) -> Result<Self> {
         let parameters = options.parameters(grid, clearance)?;
-        let mut map = GridMap::new(parameters)?;
-        map.extrinsic_callback(options.extrinsic()?)?;
         Ok(Self {
-            map,
-            collision_resolution: grid.resolution(),
-            collision_origin: grid.origin()
-                - nalgebra::Vector3::from(grid.global_index([0; 3]).map(|v| v as f64))
-                    * grid.resolution(),
-            collision_cache: None,
-            observed_cache: None,
-            cached_revisions: (0, 0),
+            map: DepthMapper::new(parameters, options.extrinsic()?, grid)?,
             options,
             last_fused: None,
             sequence: 0,
@@ -306,12 +364,13 @@ impl DepthFusion {
         pose: Isometry3<f64>,
         timer_time: f64,
     ) -> Result<bool> {
-        self.map.depth_odom_callback(frame.image, pose)?;
-        let changed = self.map.update_occupancy_callback(timer_time)?;
-        if !self.map.projected_points().is_empty() {
+        let update = self
+            .map
+            .integrate(frame.image, pose, frame.timestamp, timer_time)?;
+        if update == FrameUpdate::Observed {
             self.last_fused = Some((frame.timestamp, frame.received));
         }
-        Ok(changed)
+        Ok(update != FrameUpdate::Stale)
     }
 
     #[fastrace::trace]
@@ -319,88 +378,17 @@ impl DepthFusion {
         let Some((timestamp, fused_at)) = self.last_fused else {
             return Ok(None);
         };
-        let Some((low, high)) = self.map.bounds() else {
+        let Some(snapshot) = self.map.snapshot()? else {
             return Ok(None);
         };
-        let resolution = self.map.resolution();
-        let bounds = Bounds {
-            min: low.map(|v| f64::from(v) * resolution),
-            max: high.map(|v| (f64::from(v) + 1.) * resolution),
-        };
-        let revisions = self.map.snapshot_revisions();
-        if self.collision_cache.is_none() || revisions.0 != self.cached_revisions.0 {
-            let collision = self.build_collision(bounds)?;
-            // The planner uses shared-buffer identity to detect a changed map. Updates
-            // between snapshots can cancel, leaving the same packed collision geometry.
-            if self.collision_cache.as_ref() != Some(&collision) {
-                self.collision_cache = Some(collision);
-            }
-        }
-        if self.observed_cache.is_none() || revisions.1 != self.cached_revisions.1 {
-            let (free, dims, origin) = self.map.observed_free_buffer();
-            self.observed_cache = Some(firefly_map::ObservedSpace::from_buffer(
-                resolution, low, dims, origin, free,
-            ));
-        }
-        self.cached_revisions = revisions;
         self.sequence += 1;
         Ok(Some(LocalSnapshot {
-            collision: self
-                .collision_cache
-                .as_ref()
-                .expect("collision snapshot prepared")
-                .clone(),
-            observed: self
-                .observed_cache
-                .as_ref()
-                .expect("observed snapshot prepared")
-                .clone(),
-            bounds,
+            map: snapshot,
             sequence: self.sequence,
-            timestamp,
+            last_observed_at: timestamp,
             fused_at,
         }))
     }
-
-    fn build_collision(&self, bounds: Bounds) -> Result<firefly_map::CollisionSnapshot> {
-        let resolution = self.map.resolution();
-        let (low, high) = bounds.voxel_bounds(self.collision_origin, self.collision_resolution);
-        let mut count = 0;
-        let runs = self
-            .map
-            .inflated_runs()
-            .take(MAX_COLLISION_RUNS + 1)
-            .map(|(start, end)| {
-                count += 1;
-                Bounds {
-                    min: start.map(|v| f64::from(v) * resolution),
-                    max: end.map(|v| f64::from(v) * resolution),
-                }
-                .voxel_bounds(self.collision_origin, self.collision_resolution)
-            });
-        let snapshot = firefly_map::CollisionSnapshot::from_runs(
-            low,
-            std::array::from_fn(|i| (high[i] - low[i]) as usize),
-            runs,
-        );
-        if count > MAX_COLLISION_RUNS {
-            return Err(invalid("local collision snapshot capacity exceeded"));
-        }
-        Ok(snapshot)
-    }
-}
-
-/// Local snapshots already contain upstream inflation; never inflate them twice.
-pub fn collision_grid(source: &firefly_map::GridMap) -> Result<firefly_map::GridMap> {
-    let world_origin = source.origin()
-        - nalgebra::Vector3::from(source.global_index([0; 3]).map(|v| v as f64))
-            * source.resolution();
-    let mut map = firefly_map::GridMapBuilder::new(source.resolution(), source.dims())
-        .with_origin(world_origin)
-        .with_obstacles_inflation(0.)
-        .build()?;
-    map.move_ring_buffer(source.origin() + source.size() * 0.5);
-    Ok(map)
 }
 
 fn invalid(message: &str) -> Error {

@@ -18,7 +18,7 @@ from firefly_workspace.recording import recording_chunks, recording_files
 from firefly_ipc.messages import (
     CAMERA_RIG_TOPIC, CameraRig, VIO_PREDICTION_TOPIC, VIO_PREDICTION_BUFFER_SIZE, VioPrediction,
     FC_STATUS_BUFFER_SIZE, FC_STATUS_TOPIC, FcStatusMessage,
-    SCALAR_BUFFER_SIZE, VIZ_MAX_PUBLISHERS, DownImageMessage, GrayImageMessage,
+    SCALAR_BUFFER_SIZE, VIZ_MAX_PUBLISHERS, DepthImageMessage, DownImageMessage, GrayImageMessage,
     LandingTargetMessage, LogMessage, NavigationMessage, OdomMessage,
     ScalarMessage, TraceContext, VizMessage,
 )
@@ -132,6 +132,96 @@ def read(path, *, complete=True):
         if chunk.entity_path == "/logs/mimir" and "TextLog:text" in batch.schema.names:
             logs.extend(value for row in batch.column("TextLog:text").to_pylist() for value in row)
     return result, logs
+
+
+def test_map_worker_to_recorded_map_panel():
+    """Drive only mapping inputs and check the original IPC rows against the sealed recording."""
+    with isolated_run(ROOT):
+        recorder, path = recording()
+        worker = None
+        live = {}
+        stamps = [1 + i / 8 for i in range(24)]
+        try:
+            node = iox2.NodeBuilder.new().create(iox2.ServiceType.Ipc)
+            poses = publisher(node, "Firefly/Odometry", OdomMessage)
+            images = publisher(node, "Firefly/Depth", DepthImageMessage)
+            scalars = (node.service_builder(iox2.ServiceName.new("Firefly/VizScalars"))
+                       .publish_subscribe(ScalarMessage).user_header(TraceContext)
+                       .subscriber_max_buffer_size(SCALAR_BUFFER_SIZE).max_publishers(VIZ_MAX_PUBLISHERS)
+                       .open_or_create().subscriber_builder().buffer_size(SCALAR_BUFFER_SIZE).create())
+
+            def drain():
+                while (sample := scalars.receive()) is not None:
+                    message = sample.payload().contents
+                    entity = bytes(message.entity[:message.entity_len]).decode()
+                    if entity.startswith("map/"):
+                        row = round(message.timestamp * 1e9), list(message.scalars[:message.scalar_count])
+                        live.setdefault(entity, []).append(row)
+
+            ready = threading.Event()
+            worker = ManagedProcess([str(ROOT / "target/release/planner")], cwd=ROOT,
+                                    env={**os.environ, "RUST_LOG": "info"},
+                                    on_line=lambda line: ready.set() if "主循环启动" in line else None)
+            assert ready.wait(10), list(worker.tail)
+            image = DepthImageMessage(width=320, height=240)
+            for i, stamp in enumerate(stamps):
+                pose = OdomMessage(timestamp=stamp, position_x=.25 if i % 8 >= 4 else 0.,
+                                   quat_w=1., is_initialized=True)
+                poses.loan_uninit().write_payload(pose).send()
+                image.timestamp = stamp
+                image.data[:] = [0. if i % 8 == 7 else 2.] * len(image.data)
+                images.loan_uninit().write_payload(image).send()
+                deadline = time.monotonic() + 2
+                while len(live.get("map/work", [])) <= i:
+                    drain()
+                    assert time.monotonic() < deadline, (i, list(worker.tail))
+                    time.sleep(.005)
+            # A maintenance-only update reuses the last measurement timestamp.
+            time.sleep(.55)
+        finally:
+            try:
+                if worker is not None:
+                    assert worker.stop() == 0, list(worker.tail)
+                    drain()
+            finally:
+                assert recorder.stop() == 0, list(recorder.tail)
+        rows, logs = read(path)
+        assert "recording complete" in logs
+        assert {name: values for name, values in rows.items() if name.startswith("map/")} == live
+        fields = {
+            "map/frame_ms": ["pair_wait_ms", "update_ms"],
+            "map/update_ms": ["integrate_ms", "maintenance_ms", "snapshot_ms", "handoff_ms"],
+            "map/fusion_ms": ["projection_ms", "window_ms", "raycast_ms", "inflation_ms"],
+            "map/work": ["projected_rays", "voted_voxels", "cleared_voxels"],
+        }
+        labels = {}
+        for chunk in recording_chunks(path):
+            name = chunk.entity_path.lstrip("/")
+            if chunk.is_static and name in fields:
+                batch = chunk.to_record_batch()
+                if "SeriesLines:names" in batch.schema.names:
+                    labels[name] = batch.column("SeriesLines:names").to_pylist()[0]
+        assert labels == {name: [f"{name}/{field}" for field in columns] for name, columns in fields.items()}
+        expected = [round(t * 1e9) for t in stamps]
+        for name in ("map/work", "map/frame_ms", "map/fusion_ms"):
+            assert [t for t, _ in rows[name]] == expected
+        updates = [(t, values) for t, values in rows["map/update_ms"] if values[0] > 0]
+        assert [t for t, _ in updates] == expected
+        assert any(t == expected[-1] and fusion == 0 and fade > 0
+                   for t, (fusion, fade, _, _) in rows["map/update_ms"])
+        for i, ((_, work), (_, stages), (_, frame), (_, update)) in enumerate(zip(
+            rows["map/work"], rows["map/fusion_ms"], rows["map/frame_ms"], updates, strict=True
+        )):
+            empty = i == 0 or i % 8 == 7
+            rays, voted, cleared = work
+            assert rays == (0 if empty else 158 * 118)
+            assert (voted > 0) == (not empty)
+            assert (cleared > 0) == (i > 0 and i % 4 == 0)
+            assert (stages[2:] == [0., 0.]) == empty
+            assert all(d >= 0 for d in stages + frame + update)
+            assert sum(stages) <= update[0] + 1e-8
+            assert sum(update) <= frame[1] + 1e-8
+        print(f"map recording: {path}")
 
 
 @pytest.mark.parametrize("rate", [1000, 5000])

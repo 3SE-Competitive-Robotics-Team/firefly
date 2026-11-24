@@ -1,6 +1,6 @@
 [package]
 description.workspace = true
-license.workspace = true
+license = "(MIT OR Apache-2.0) AND GPL-3.0-only"
 repository.workspace = true
 readme.workspace = true
 keywords = ['grid-map', 'occupancy', 'obstacle', 'robotics']
@@ -10,7 +10,11 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 
+[features]
+depth = ["dep:fastrace"]
+
 [dependencies]
+fastrace = { workspace = true, optional = true }
 firefly-error = { workspace = true }
 nalgebra = { workspace = true }
 

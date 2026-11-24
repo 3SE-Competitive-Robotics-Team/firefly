@@ -1,3 +1,4 @@
+use super::voxel_box::VoxelBox;
 use super::{GridMap, VirtualWall};
 use firefly_error::{Error, ErrorKind};
 use nalgebra::Vector3;
@@ -64,10 +65,19 @@ impl GridMapBuilder {
     /// `InvalidArgument`：resolution 非正、dims 含零、或 `local_update_range`
     /// 非有限/非正。
     pub fn build(self) -> firefly_error::Result<GridMap> {
-        if self.resolution <= 0.0 {
+        if !self.resolution.is_finite() || self.resolution <= 0.0 {
             return Err(Error::new(
                 ErrorKind::InvalidArgument,
                 "resolution must be positive",
+            ));
+        }
+        if !self.obstacles_inflation.is_finite()
+            || self.obstacles_inflation < 0.
+            || !self.origin.iter().all(|v| v.is_finite())
+        {
+            return Err(Error::new(
+                ErrorKind::InvalidArgument,
+                "invalid grid origin or obstacle inflation",
             ));
         }
         if let Some(range) = self.local_update_range
@@ -79,7 +89,8 @@ impl GridMapBuilder {
             ));
         }
         let mut resolution = self.resolution;
-        let mut inf_grid = ((self.obstacles_inflation - 1e-5) / resolution).ceil() as i32;
+        let inf_grid = ((self.obstacles_inflation - 1e-5) / resolution).ceil() as i32;
+        let mut inf_grid = inf_grid.max(0);
         if inf_grid > 4 {
             inf_grid = 4;
             resolution = self.obstacles_inflation / f64::from(inf_grid);
@@ -106,27 +117,23 @@ impl GridMapBuilder {
         let inf_dims = [dims[0] + 2 * g, dims[1] + 2 * g, dims[2] + 2 * g];
         let inf_capacity = inf_dims[0] * inf_dims[1] * inf_dims[2];
 
-        let dims_i64 = [dims[0] as i64, dims[1] as i64, dims[2] as i64];
-        let ig = i64::from(inf_grid);
+        let center = dims.map(|n| (n / 2) as i64);
+        let bounds_error = || Error::new(ErrorKind::InvalidArgument, "grid exceeds index range");
+        let bounds = VoxelBox::centered(center, dims).ok_or_else(bounds_error)?;
+        let inf_bounds = VoxelBox::centered(center, inf_dims).ok_or_else(bounds_error)?;
         Ok(GridMap {
             world_origin: self.origin,
             resolution,
             dims,
             inf_dims,
-            local_update_range3i: [dims_i64[0] / 2, dims_i64[1] / 2, dims_i64[2] / 2],
-            low: [0; 3],
-            up: [dims_i64[0] - 1, dims_i64[1] - 1, dims_i64[2] - 1],
-            inf_low: [-ig; 3],
-            inf_up: [
-                dims_i64[0] - 1 + ig,
-                dims_i64[1] - 1 + ig,
-                dims_i64[2] - 1 + ig,
-            ],
+            bounds,
+            inf_bounds,
             ring_origin: [0; 3],
             inf_ring_origin: [0; 3],
-            center_last: [dims_i64[0] / 2, dims_i64[1] / 2, dims_i64[2] / 2],
             occupancy: super::Buffer::new(false, capacity),
             collision: None,
+            observations: None,
+            field: None,
             prior: std::sync::Arc::new(HashSet::new()),
             inflate: super::Buffer::new(0, inf_capacity),
             virtual_wall: self.virtual_wall,

@@ -175,13 +175,8 @@ fn open_manager() -> PlannerManager {
 fn coordinated_stopping_prefixes_progress_through_unknown_air_without_reversing_heading() {
     let mut m = open_manager();
     m.update_motion_context(crate::motion::MotionContext {
-        observed: firefly_map::ObservedSpace::from_buffer(
-            0.5,
-            [0; 3],
-            [40, 24, 16],
-            [0; 3],
-            &vec![false; 40 * 24 * 16],
-        ),
+        measured_at: 0.,
+        evidence_max_age: std::time::Duration::from_secs(1),
         measured_yaw: 0.,
         view_half_angle: 0.6,
     });
@@ -216,13 +211,8 @@ fn coordinated_stopping_prefixes_progress_through_unknown_air_without_reversing_
 fn expired_stopping_tail_replans_from_rest_without_extrapolation() {
     let mut m = open_manager();
     m.update_motion_context(crate::motion::MotionContext {
-        observed: firefly_map::ObservedSpace::from_buffer(
-            0.5,
-            [0; 3],
-            [40, 24, 16],
-            [0; 3],
-            &vec![true; 40 * 24 * 16],
-        ),
+        measured_at: 0.,
+        evidence_max_age: std::time::Duration::from_secs(1),
         measured_yaw: 0.,
         view_half_angle: 0.6,
     });

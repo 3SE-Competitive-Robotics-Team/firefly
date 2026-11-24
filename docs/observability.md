@@ -86,7 +86,8 @@ Latest-value business channels retain the newest available sample. Complete repl
 registered diagnostic observations with coverage checks. Start mimir first and stop it last.
 `RUST_LOG=info,planner-motion=debug` adds one bounded proposal-summary log per motion coordination
 attempt: initial state, heading decision, first sampled rejection (window, occupied or V/A/J), and
-first unobserved sample as a separate coverage diagnostic. EGO's optimistic obstacle policy permits unknown
+the end of the first chord whose clearance neighborhood lacks recent free evidence or whose centerline is blocked. The diagnostic includes the fixed occupancy, online evidence and collision state at that endpoint.
+Evidence age uses the odometry measurement time and the planner's one-second freshness limit. EGO's optimistic obstacle policy permits unknown
 space. The summary uses `logs/planner` and its existing log budgets; masks and individual sample checks remain local. Leave it disabled for ordinary operation; incomplete log recording fails validation.
 Sequence checks cover the subscription interval. Earlier data and the tail of a crashed producer require
 independent input coverage evidence.
@@ -123,6 +124,10 @@ of subsequent business events. Known loss makes the recording fail.
 | `plan/*` | Global guides, accepted executable local paths including their stopping tail, poses, obstacle planes and maps for display |
 | `depth/inference` | At most 1 Hz while publishing depth, four scalars on the image clock: cumulative published frames, preprocessing + inference + restore + IPC milliseconds for that frame, center pixel metres, A733 NPU active (0/1). No depth image telemetry. |
 | `plan/collision` | Planner-owned depth map after obstacle inflation, in odom coordinates at the planner simulation timestamp; bounded voxel snapshots/deltas for checking collision geometry, using the existing map display cadence and budgets |
+| `map/frame_ms` | Per accepted depth frame, including empty frames. Wall milliseconds from sampled-image enqueue to fusion start, then from fusion start through local snapshot handoff. |
+| `map/update_ms` | One row per worker update after the first accepted measurement. Integration, obstacle maintenance, snapshot construction and shared-slot handoff (including release of a superseded snapshot), in wall milliseconds. Zero marks a skipped operation. Maintenance alone uses the latest accepted measurement timestamp. |
+| `map/fusion_ms` | Per accepted frame, wall milliseconds in depth projection, window update, ray traversal plus probability/evidence updates, and inflation. Window time includes clearing exiting slabs. |
+| `map/work` | Per accepted frame, number of valid projected endpoints, distinct voxels receiving probability votes, and exiting window voxels cleared. Empty frames can move the window. |
 | `planner/loop_hz`, `planner/fsm_hz` | Completed execution callbacks and actual FSM executions per wall second; FSM executions require fresh odometry and a ready map |
 | `planner/replan_submitted_hz`, `planner/replan_hz` | Worker jobs submitted and candidates actually adopted per wall second |
 | `planner/replan_ms` | Per completed job: `latency_ms` from submission/snapshot through main-thread adoption/discard, solver-thread `solve_ms`, and `adopted` (0/1) |
@@ -170,6 +175,17 @@ Each callback timing row is retained (nominally 100 Hz per app), plus one row pe
 publisher/queue limits and complete-retention checks apply. Normal one-Hz replanning adds about 26.5 kB/s
 before HIL framing; the nominal 100-Hz completion bound gives 39.2 kB/s, with a maximum nine-row burst.
 The existing HIL scalar path forwards these observations without additional topics or queue budgets.
+
+The **Map** tab in the lower panel reads these four numeric entities on the depth measurement
+`sim_time`. The mapping worker publishes them directly on `Firefly/VizScalars` with standard logging
+settings. The voxel display worker opens only the voxel port. At a 32 ms frame timer and 500 ms
+maintenance timer the nominal upper bound is 127 scalar rows/s (16,256 payload bytes/s), with at
+most four rows per worker update. Counts use existing buffers and disjoint slab dimensions.
+Frame update time includes maintenance performed during the same worker iteration and ends before diagnostic IPC.
+The queue wait begins after depth resampling. Snapshot handoff ends on the map worker and records
+neither planner consumption nor Mimir serialization. To verify rows and timestamps from the actual
+worker in an indexed RRD, build release `planner` and `mimir`, then run
+`uv run pytest tests/system/test_mimir.py::test_map_worker_to_recorded_map_panel -s`.
 Validation checks production with log output disabled, field order/units, clock separation, result/sample/send
 counts, observed queue high-water, source continuity and RRD shutdown integrity. Performance run environment
 and resource snapshots use bounded `logs/performance` events on the existing Log channel (512-byte limit).

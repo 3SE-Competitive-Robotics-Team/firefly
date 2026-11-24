@@ -12,7 +12,7 @@ Source distributions include this directory and the repository README.
 | `firefly-calibration` | BSD-3-Clause, MIT | [BSD-3-Clause](crates/firefly-calibration/LICENSE), [Pangolin MIT](crates/firefly-calibration/LICENSE-MIT-PANGOLIN) |
 | `firefly-opengv` | BSD-style license and MPL-2.0 | [OpenGV notice](crates/firefly-opengv/License.txt) |
 | `firefly-rootslam-mapping` | BSD-3-Clause, MIT | [BSD-3-Clause](crates/firefly-rootslam-mapping/LICENSE), [MIT](crates/firefly-rootslam-mapping/LICENSE-MIT) |
-| `firefly-ego-map` | GPL-3.0-only | [EGO-Planner-v2](crates/firefly-ego-map/LICENSE) |
+| `firefly-map` | MIT OR Apache-2.0 for the map core, GPL-3.0-only for the optional `depth` module and its EGO reference | [EGO-Planner-v2](crates/firefly-map/LICENSE-EGO) |
 | `firefly-imu-propagation` | BSD-3-Clause | [OKVIS-derived propagation attribution](third-party-notices.md#okvis2-x) |
 | Other translated or derived components | Component-specific notices | [Additional license texts and attributions](third-party-notices.md) |
 

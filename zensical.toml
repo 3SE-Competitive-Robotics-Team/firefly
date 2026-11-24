@@ -13,6 +13,7 @@ nav = [
   { "开发与设计" = [
     { "开发指南" = "development.md" },
     { "系统架构" = "architecture.md" },
+    { "原生占据地图管理设计" = "map-management.md" },
     { "硬件规格" = "hw/spec.md" },
   ] },
   { "运行与测评" = [

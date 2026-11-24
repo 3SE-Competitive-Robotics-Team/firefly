@@ -1,4 +1,4 @@
-use firefly_ego_map::{DepthImage, GridMap, MappingParameters};
+use super::{DepthImage, MappingParameters, grid::GridMap};
 use nalgebra::{Isometry3, Vector3};
 
 fn parameters() -> MappingParameters {
@@ -18,12 +18,106 @@ fn parameters() -> MappingParameters {
     }
 }
 
+#[test]
+fn rejected_projection_preserves_window_and_allows_retry_with_the_same_stamp() {
+    use super::{DepthMapper, FrameUpdate};
+    let output = crate::GridMapBuilder::new(1., [8; 3]).build().unwrap();
+    let p = MappingParameters {
+        fx: 1e-20,
+        ..parameters()
+    };
+    let pose = Isometry3::identity();
+    let mut mapper = DepthMapper::new(p, pose, &output).unwrap();
+    assert_eq!(
+        mapper.integrate(depth(1000), pose, 10., 0.).unwrap(),
+        FrameUpdate::Observed
+    );
+    let before = mapper.snapshot().unwrap().unwrap();
+    let invalid = DepthImage::new(2, 1, vec![1000, 1000]).unwrap();
+    assert!(
+        mapper
+            .integrate(invalid, Isometry3::translation(8., 0., 0.), 11., 0.8)
+            .is_err()
+    );
+    let after = mapper.snapshot().unwrap().unwrap();
+    assert_eq!(after.bounds, before.bounds);
+    assert!(after.collision.shares_data(&before.collision));
+    assert!(!mapper.timed_out_at(1.).unwrap());
+    assert!(mapper.timed_out_at(1.001).unwrap());
+    assert_eq!(
+        mapper.integrate(depth(1000), pose, 11., 1.1).unwrap(),
+        FrameUpdate::Observed
+    );
+    assert_eq!(
+        mapper.integrate(depth(1000), pose, 11., 1.2).unwrap(),
+        FrameUpdate::Stale
+    );
+}
+
 fn logit(probability: f64) -> f64 {
     (probability / (1.0 - probability)).ln()
 }
 
 fn depth(raw: u16) -> DepthImage {
     DepthImage::new(1, 1, vec![raw]).unwrap()
+}
+
+#[test]
+fn returning_ray_refreshes_free_evidence_on_its_first_frame() {
+    use crate::{Evidence, OnlineState};
+    use std::{f64::consts::PI, time::Duration};
+
+    let origin = Vector3::repeat(0.25);
+    let front = Isometry3::translation(origin.x, origin.y, origin.z);
+    let back = Isometry3::new(origin, Vector3::y() * PI);
+    let probe = origin + Vector3::z();
+    for gap in [255, 256, 257, 512] {
+        for returning_depth in [2000, 3000] {
+            let mut map = GridMap::new(parameters()).unwrap();
+            for frame in 0..gap {
+                let pose = if frame == 0 { front } else { back };
+                map.depth_pose_callback(depth(2000), pose).unwrap();
+                let time = f64::from(frame);
+                map.update_at(time, time).unwrap();
+            }
+            let time = f64::from(gap);
+            assert_eq!(
+                map.observations()
+                    .unwrap()
+                    .sample(probe, time, Duration::ZERO),
+                OnlineState::Expired(Evidence::Free(0.))
+            );
+            map.depth_pose_callback(depth(returning_depth), front)
+                .unwrap();
+            map.update_at(time, time).unwrap();
+            assert_eq!(
+                map.observations()
+                    .unwrap()
+                    .sample(probe, time, Duration::ZERO),
+                OnlineState::Free(time),
+                "gap {gap}, returning depth {returning_depth}"
+            );
+        }
+    }
+}
+
+#[test]
+fn dense_rays_to_one_cell_apply_one_probability_update() {
+    let p = MappingParameters {
+        fx: 1e8,
+        fy: 1e8,
+        ..parameters()
+    };
+    let pose = Isometry3::translation(0.25, 0.25, 0.25);
+    let mut dense = GridMap::new(p.clone()).unwrap();
+    let mut single = GridMap::new(p).unwrap();
+    let (width, height) = (257, 256);
+    let image = DepthImage::new(width, height, vec![2000; width * height]).unwrap();
+    dense.depth_pose_callback(image, pose).unwrap();
+    single.depth_pose_callback(depth(2000), pose).unwrap();
+    dense.update_at(1., 1.).unwrap();
+    single.update_at(1., 1.).unwrap();
+    assert_eq!(dense.occupancy_buffer(), single.occupancy_buffer());
 }
 
 #[test]
@@ -70,7 +164,21 @@ fn sampled_depth_matches_dense_projection_and_occupancy() {
             assert_eq!(sampled.projected_points(), dense.projected_points());
             assert_eq!(sampled.occupancy_buffer(), dense.occupancy_buffer());
             assert_eq!(sampled.inflation_buffer(), dense.inflation_buffer());
-            assert_eq!(sampled.observed_free_buffer(), dense.observed_free_buffer());
+            let observed = sampled.observations().unwrap();
+            let expected = dense.observations().unwrap();
+            let (low, high) = dense.bounds().unwrap();
+            for x in low[0]..=high[0] {
+                for y in low[1]..=high[1] {
+                    for z in low[2]..=high[2] {
+                        let p = (Vector3::new(x, y, z).cast::<f64>() + Vector3::repeat(0.5))
+                            * dense.resolution();
+                        assert_eq!(
+                            observed.sample(p, timestamp, std::time::Duration::MAX),
+                            expected.sample(p, timestamp, std::time::Duration::MAX)
+                        );
+                    }
+                }
+            }
         }
     }
 }
@@ -126,12 +234,18 @@ fn single_ray_updates_endpoint_and_traversed_cells() {
     assert_eq!(map.occupancy_at(hit), 1);
     assert_eq!(map.inflated_occupancy_at(hit), 32768);
     assert_eq!(map.inflated_occupancy_at(free), 1);
-    let (observed, _, _) = map.observed_free_buffer();
-    assert!(observed[map.buffer_index(free).unwrap()]);
-    assert!(observed[map.buffer_index(camera).unwrap()]);
-    assert!(!observed[map.buffer_index(hit).unwrap()]);
+    let observations = map.observations().unwrap();
+    let observed = |p| {
+        matches!(
+            observations.sample(p, 11., std::time::Duration::from_secs(2)),
+            crate::OnlineState::Free(_)
+        )
+    };
+    assert!(observed(free));
+    assert!(observed(camera));
+    assert!(!observed(hit));
     let unseen = Vector3::new(2.25, 0.25, 1.25);
-    assert!(!observed[map.buffer_index(unseen).unwrap()]);
+    assert!(!observed(unseen));
 }
 
 #[test]
@@ -181,6 +295,46 @@ fn filter_margin_stride_and_projection_follow_pixel_coordinates() {
 }
 
 #[test]
+fn upper_face_cannot_alias_opposite_voxel_and_shift_preserves_evidence() {
+    use crate::{Evidence, OnlineState};
+    let mut map = GridMap::new(MappingParameters {
+        resolution: 0.5,
+        local_update_range: [1.5; 3],
+        ..parameters()
+    })
+    .unwrap();
+    let age = std::time::Duration::from_secs(1);
+    for frame in 0..8 {
+        map.depth_pose_callback(depth(1500), Isometry3::identity())
+            .unwrap();
+        map.update_at(20. + f64::from(frame), f64::from(frame))
+            .unwrap();
+    }
+    let opposite = Vector3::new(0., 0., -1.25);
+    assert_eq!(map.occupancy_at(opposite), 0);
+    assert_eq!(map.buffer_index(Vector3::new(0., 0., 1.5)), None);
+    assert_eq!(
+        map.observations().unwrap().sample(opposite, 7., age),
+        OnlineState::Unknown
+    );
+    // Move the upper face down by one cell. The last retained plane contains this hit.
+    for i in 8..16 {
+        map.depth_pose_callback(depth(750), Isometry3::identity())
+            .unwrap();
+        map.update_at(20. + f64::from(i), f64::from(i)).unwrap();
+    }
+    let hit = Vector3::new(0., 0., 0.75);
+    map.depth_pose_callback(depth(0), Isometry3::translation(0., 0., -0.5))
+        .unwrap();
+    map.update_at(40., 20.).unwrap();
+    assert_eq!(map.occupancy_at(hit), 1);
+    assert_eq!(
+        map.observations().unwrap().sample(hit, 20., age),
+        OnlineState::Expired(Evidence::Occupied(15.))
+    );
+}
+
+#[test]
 fn outside_endpoint_clears_rays_without_inserting_a_boundary_obstacle() {
     let mut map = GridMap::new(parameters()).unwrap();
     for i in 0..8 {
@@ -211,11 +365,8 @@ fn cloud_requires_independent_odom_and_does_not_remove_obstacles() {
 
 #[test]
 fn virtual_wall_is_checked_after_window_membership() {
-    let mut config = parameters();
-    config.enable_virtual_wall = true;
-    config.virtual_ground = -0.1;
-    config.virtual_ceil = 3.0;
-    let mut map = GridMap::new(config).unwrap();
+    let mut map = GridMap::new(parameters()).unwrap();
+    map.reference_wall = Some((-0.1, 3.));
     map.depth_pose_callback(depth(0), Isometry3::identity())
         .unwrap();
     map.update_occupancy_callback(10.0).unwrap();
@@ -275,13 +426,13 @@ fn fading_removes_inflation_on_the_threshold_crossing() {
     map.odom_callback(Isometry3::identity()).unwrap();
     map.cloud_callback(&[point]);
     let step = (logit(0.97) - logit(0.80)) / 2.0;
-    map.fading_callback();
+    map.fading_callback(None);
     assert!(
         (map.occupancy_buffer()[map.buffer_index(point).unwrap()] - (logit(0.97) - step)).abs()
             < 1e-12
     );
     for _ in 0..3 {
-        map.fading_callback();
+        map.fading_callback(None);
     }
     assert_eq!(map.occupancy_at(point), 0);
     assert_eq!(map.inflated_occupancy_at(point), 0);
@@ -316,4 +467,77 @@ fn occupancy_query_and_inflation_keep_the_cpp_threshold_comparisons() {
     );
     assert_eq!(map.occupancy_at(point), 0); // getOccupancy uses >.
     assert_eq!(map.inflated_occupancy_at(point), 32768); // Inflation uses >=.
+}
+
+#[test]
+fn snapshot_matches_live_voxels_after_fusion_fading_and_window_moves() {
+    use super::DepthMapper;
+    use std::time::Duration;
+    let output = crate::GridMapBuilder::new(0.25, [8; 3]).build().unwrap();
+    let config = MappingParameters {
+        resolution: 0.25,
+        local_update_range: [1.5; 3],
+        obstacles_inflation: 0.25,
+        fading_time: 0.51,
+        p_hit: 0.9,
+        p_min: 0.1,
+        p_occ: 0.5,
+        ..parameters()
+    };
+    let mut mapper = DepthMapper::new(config, Isometry3::identity(), &output).unwrap();
+    for (i, (x, units)) in [
+        (0., 500),
+        (0., 500),
+        (0., 500),
+        (0., 500),
+        (0., 500),
+        (0., 1250),
+        (0.5, 1250),
+        (2.25, 500),
+        (-1., 500),
+        (-1., 500),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let timestamp = 1. + i as f64 * 0.1;
+        mapper
+            .integrate(
+                depth(units),
+                Isometry3::translation(x, 0., 0.),
+                timestamp,
+                timestamp,
+            )
+            .unwrap();
+        for fade in [false, true] {
+            if fade {
+                mapper.fade();
+            }
+            let snapshot = mapper.snapshot().unwrap().unwrap();
+            let (low, high) = mapper.grid.bounds().unwrap();
+
+            for z in low[2]..=high[2] {
+                for y in low[1]..=high[1] {
+                    for x in low[0]..=high[0] {
+                        let point = (Vector3::new(x, y, z).cast::<f64>() + Vector3::repeat(0.5))
+                            * mapper.grid.resolution();
+                        let global = ((point - mapper.collision_origin)
+                            / mapper.collision_resolution)
+                            .map(|v| v.floor() as i64);
+                        assert_eq!(
+                            snapshot.collision.is_occupied(global.into()),
+                            mapper.grid.inflated_occupancy_at(point) > 0
+                        );
+                        if let crate::OnlineState::Occupied(_) =
+                            snapshot
+                                .observed
+                                .sample(point, timestamp, Duration::from_secs(1))
+                        {
+                            assert!(mapper.grid.inflated_occupancy_at(point) > 0);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

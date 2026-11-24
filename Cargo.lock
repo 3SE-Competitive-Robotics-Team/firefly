@@ -3584,15 +3584,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "firefly-ego-map"
-version = "0.1.0"
-dependencies = [
- "fastrace",
- "firefly-error",
- "nalgebra",
-]
-
-[[package]]
 name = "firefly-error"
 version = "0.1.0"
 
@@ -3677,6 +3668,7 @@ dependencies = [
 name = "firefly-map"
 version = "0.1.0"
 dependencies = [
+ "fastrace",
  "firefly-error",
  "nalgebra",
 ]
@@ -7343,7 +7335,6 @@ dependencies = [
  "fastrace",
  "firefly-base",
  "firefly-config",
- "firefly-ego-map",
  "firefly-error",
  "firefly-map",
  "firefly-observability",
@@ -7355,6 +7346,7 @@ dependencies = [
  "log",
  "nalgebra",
  "serde",
+ "sha2",
  "toml 1.2.2+spec-1.1.0",
  "usage-rs",
 ]

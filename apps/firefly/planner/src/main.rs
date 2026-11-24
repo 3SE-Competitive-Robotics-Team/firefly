@@ -154,7 +154,7 @@ impl App {
     #[allow(clippy::too_many_lines)]
     fn new(
         config: PlannerConfig,
-        mapping: config::MappingOptions,
+        mapping: &config::MappingOptions,
         manager_options: ManagerOptions,
         start: [f64; 3],
         goal: Option<[f64; 3]>,
@@ -165,7 +165,6 @@ impl App {
             (cx.min(firefly_pubsub::camera::IMAGE_WIDTH as f64 - 1. - cx) / fx).atan();
         let depth_fusion =
             depth_mapping::DepthFusion::new(&grid, mapping.depth, config.obstacle_clearance)?;
-        grid = depth_mapping::collision_grid(&grid)?;
         if config.virtual_ground.is_some() || config.virtual_ceiling.is_some() {
             grid.set_virtual_wall(VirtualWall {
                 ground: config.virtual_ground.unwrap_or(f64::NEG_INFINITY),
@@ -409,7 +408,7 @@ impl App {
             log::info!("局部状态就绪，规划从实测位置开始");
         }
         let odometry = self.state_input.odometry().unwrap();
-        if self.synchronize_map(&odometry)? != MapStatus::Ready {
+        if self.synchronize_map(&odometry) != MapStatus::Ready {
             self.solver.cancel();
             self.output.control(false)?;
             return Ok(());
@@ -418,10 +417,8 @@ impl App {
         self.fsm
             .manager_mut()
             .update_motion_context(firefly_planner::motion::MotionContext {
-                observed: self
-                    .map_input
-                    .observed()
-                    .expect("ready map has observation mask"),
+                measured_at: odometry.timestamp,
+                evidence_max_age: Duration::from_secs_f64(MAP_TIMEOUT),
                 measured_yaw: snapshot.orientation.euler_angles().2,
                 view_half_angle: self.view_half_angle,
             });
@@ -508,14 +505,13 @@ impl App {
 
     fn handoff_trajectory(&mut self) -> Result<()> {
         self.poll_odometry()?;
-        if !self.state_input.odometry().is_some_and(|nav| {
-            !self.state_input.stopped()
-                && !self.depth.terminated()
-                && self
-                    .map_input
-                    .status(&nav, Instant::now(), Duration::from_secs_f64(MAP_TIMEOUT))
-                    == MapStatus::Ready
-        }) {
+        let ready = match self.state_input.odometry() {
+            Some(odom) if !self.state_input.stopped() => {
+                self.synchronize_map(&odom) == MapStatus::Ready
+            }
+            _ => false,
+        };
+        if !ready {
             self.solver.cancel();
             self.output.control(false)?;
             return Ok(());
@@ -539,28 +535,19 @@ impl App {
     }
 
     /// Execution and safety callbacks must query the same accepted map snapshot.
-    fn synchronize_map(
-        &mut self,
-        odometry: &firefly_pubsub::odom::OdomMessage,
-    ) -> Result<MapStatus> {
+    fn synchronize_map(&mut self, odometry: &firefly_pubsub::odom::OdomMessage) -> MapStatus {
         let started = Instant::now();
-        self.map_input
-            .prepare_region(self.fsm.manager_mut().map_mut(), odometry, true);
         if self.depth.terminated() {
-            return Ok(MapStatus::Unavailable);
+            return MapStatus::Unavailable;
         }
-        let status = self.map_input.status(
+        let status = self.map_input.synchronize(
+            self.fsm.manager_mut().map_mut(),
             odometry,
             Instant::now(),
             Duration::from_secs_f64(MAP_TIMEOUT),
         );
-        if status != MapStatus::Ready {
-            return Ok(status);
-        }
-        self.map_input
-            .apply(self.fsm.manager_mut().map_mut(), odometry, true)?;
         log_slow_stage("map", started);
-        Ok(MapStatus::Ready)
+        status
     }
 
     /// 独立安全定时回调，与执行状态机共用单线程事件队列。
@@ -579,7 +566,7 @@ impl App {
         let now = self.t_sim;
         let measured = Some(planning_state(snapshot));
         let odometry = self.state_input.odometry().unwrap();
-        let status = self.synchronize_map(&odometry)?;
+        let status = self.synchronize_map(&odometry);
         if status != MapStatus::Ready {
             self.solver.cancel();
             if status == MapStatus::Unavailable
@@ -598,10 +585,8 @@ impl App {
         self.fsm
             .manager_mut()
             .update_motion_context(firefly_planner::motion::MotionContext {
-                observed: self
-                    .map_input
-                    .observed()
-                    .expect("ready map has observation mask"),
+                measured_at: odometry.timestamp,
+                evidence_max_age: Duration::from_secs_f64(MAP_TIMEOUT),
                 measured_yaw: snapshot.orientation.euler_angles().2,
                 view_half_angle: self.view_half_angle,
             });
@@ -863,7 +848,7 @@ fn run(
     )?;
     let mut app = App::new(
         cfg.config,
-        cfg.mapping,
+        &cfg.mapping,
         cfg.manager,
         start.unwrap_or([0.0; 3]),
         goal,

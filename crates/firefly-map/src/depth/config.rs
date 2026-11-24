@@ -7,9 +7,6 @@ pub struct MappingParameters {
     pub resolution: f64,
     pub local_update_range: [f64; 3],
     pub obstacles_inflation: f64,
-    pub enable_virtual_wall: bool,
-    pub virtual_ceil: f64,
-    pub virtual_ground: f64,
     pub fx: f64,
     pub fy: f64,
     pub cx: f64,
@@ -17,8 +14,6 @@ pub struct MappingParameters {
     pub odom_depth_timeout: f64,
     pub use_depth_filter: bool,
     pub depth_filter_mindist: f64,
-    /// Loaded by C++; its temporal consistency branch is disabled.
-    pub depth_filter_tolerance: f64,
     pub depth_filter_margin: i32,
     pub k_depth_scaling_factor: f64,
     pub skip_pixel: i32,
@@ -28,8 +23,8 @@ pub struct MappingParameters {
     pub p_max: f64,
     pub p_occ: f64,
     pub fading_time: f64,
-    /// Loaded by C++; the active raycaster does not use this value.
-    pub min_ray_length: f64,
+    /// Maximum measurement age of an online obstacle, in seconds.
+    pub occupied_max_age: Option<f64>,
 }
 
 impl Default for MappingParameters {
@@ -38,9 +33,6 @@ impl Default for MappingParameters {
             resolution: -1.,
             local_update_range: [-1.; 3],
             obstacles_inflation: -1.,
-            enable_virtual_wall: false,
-            virtual_ceil: -1.,
-            virtual_ground: -1.,
             fx: -1.,
             fy: -1.,
             cx: -1.,
@@ -48,7 +40,6 @@ impl Default for MappingParameters {
             odom_depth_timeout: 1.,
             use_depth_filter: true,
             depth_filter_mindist: 0.1,
-            depth_filter_tolerance: -1.,
             depth_filter_margin: -1,
             k_depth_scaling_factor: -1.,
             skip_pixel: -1,
@@ -58,13 +49,13 @@ impl Default for MappingParameters {
             p_max: 0.97,
             p_occ: 0.80,
             fading_time: 1000.,
-            min_ray_length: 0.1,
+            occupied_max_age: None,
         }
     }
 }
 
 impl MappingParameters {
-    pub(crate) fn validate(&self) -> Result<()> {
+    pub(super) fn validate(&self) -> Result<()> {
         let positive = [
             self.resolution,
             self.fx,
@@ -78,16 +69,15 @@ impl MappingParameters {
             self.cx,
             self.cy,
             self.obstacles_inflation,
-            self.virtual_ceil,
-            self.virtual_ground,
             self.odom_depth_timeout,
             self.depth_filter_mindist,
-            self.depth_filter_tolerance,
             self.fading_time,
-            self.min_ray_length,
         ];
         if positive.iter().any(|x| !x.is_finite() || *x <= 0.)
             || finite.iter().any(|x| !x.is_finite())
+            || self
+                .occupied_max_age
+                .is_some_and(|age| !age.is_finite() || age <= 0.)
             || self.obstacles_inflation < 0.
             || self.skip_pixel <= 0
             || self.depth_filter_margin < 0
@@ -105,13 +95,13 @@ impl MappingParameters {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct DepthSampling {
+pub(super) struct DepthSampling {
     margin: usize,
     step: usize,
 }
 
 impl DepthSampling {
-    pub(crate) fn for_map(p: &MappingParameters) -> Self {
+    pub(super) fn for_map(p: &MappingParameters) -> Self {
         Self {
             margin: if p.use_depth_filter {
                 p.depth_filter_margin as usize
@@ -126,7 +116,7 @@ impl DepthSampling {
         (self.margin..size.saturating_sub(self.margin)).step_by(self.step)
     }
 
-    pub(crate) fn coordinates(
+    pub(super) fn coordinates(
         self,
         width: usize,
         height: usize,
@@ -140,10 +130,10 @@ impl DepthSampling {
 /// Depth units in source image coordinates, stored densely or on the map's sampling grid.
 #[derive(Clone, Debug)]
 pub struct DepthImage {
-    pub(crate) width: usize,
-    pub(crate) height: usize,
-    pub(crate) pixels: Vec<u16>,
-    pub(crate) sampling: Option<DepthSampling>,
+    pub(super) width: usize,
+    pub(super) height: usize,
+    pub(super) pixels: Vec<u16>,
+    pub(super) sampling: Option<DepthSampling>,
 }
 impl DepthImage {
     /// # Errors
@@ -160,7 +150,7 @@ impl DepthImage {
         })
     }
 
-    pub(crate) fn sample<T: Copy>(
+    pub(super) fn sample<T: Copy>(
         width: usize,
         height: usize,
         source: &[T],
@@ -201,7 +191,7 @@ impl DepthImage {
         })
     }
 
-    pub(crate) fn validate_sampling(&self, sampling: DepthSampling) -> Result<()> {
+    pub(super) fn validate_sampling(&self, sampling: DepthSampling) -> Result<()> {
         if self.sampling.is_some_and(|layout| layout != sampling) {
             return Err(invalid("depth sampling grid differs from map"));
         }
@@ -209,10 +199,10 @@ impl DepthImage {
     }
 }
 
-pub(crate) fn invalid(message: &str) -> Error {
+pub(super) fn invalid(message: &str) -> Error {
     Error::new(ErrorKind::InvalidArgument, message).with_operation("ego_map")
 }
 
-pub(crate) fn logit(p: f64) -> f64 {
+pub(super) fn logit(p: f64) -> f64 {
     (p / (1. - p)).ln()
 }

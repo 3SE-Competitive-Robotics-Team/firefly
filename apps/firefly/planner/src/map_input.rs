@@ -1,42 +1,16 @@
 use firefly_error::{Error, ErrorKind, Result};
-use firefly_map::{CollisionSnapshot, GridMap};
+use firefly_map::{GridMap, depth::DepthSnapshot};
 use firefly_pubsub::odom::OdomMessage;
 use nalgebra::Vector3;
 use std::time::{Duration, Instant};
 
-/// Half-open metric bounds in the local odom frame.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Bounds {
-    pub min: [f64; 3],
-    pub max: [f64; 3],
-}
-impl Bounds {
-    pub fn valid(&self) -> bool {
-        (0..3).all(|i| {
-            self.min[i].is_finite() && self.max[i].is_finite() && self.min[i] < self.max[i]
-        })
-    }
-    pub fn voxel_bounds(&self, origin: Vector3<f64>, resolution: f64) -> ([i64; 3], [i64; 3]) {
-        let low = std::array::from_fn(|i| {
-            lattice_coordinate((self.min[i] - origin[i]) / resolution).floor() as i64
-        });
-        let high = std::array::from_fn(|i| {
-            lattice_coordinate((self.max[i] - origin[i]) / resolution).ceil() as i64
-        });
-        (low, high)
-    }
-    pub fn contains(&self, other: &Self) -> bool {
-        (0..3).all(|i| self.min[i] <= other.min[i] && self.max[i] >= other.max[i])
-    }
-}
+pub use firefly_map::depth::Bounds;
 
 /// Complete collision geometry passed between threads in this planner process.
 pub struct LocalSnapshot {
-    pub collision: CollisionSnapshot,
-    pub observed: firefly_map::ObservedSpace,
-    pub bounds: Bounds,
+    pub map: DepthSnapshot,
     pub sequence: u64,
-    pub timestamp: f64,
+    pub last_observed_at: f64,
     pub fused_at: Instant,
 }
 
@@ -49,106 +23,73 @@ pub enum MapStatus {
 
 #[derive(Default)]
 pub struct MapInput {
-    required: Option<Bounds>,
     snapshot: Option<LocalSnapshot>,
-    fault: Option<Error>,
+    faulted: bool,
 }
 impl MapInput {
-    pub fn observed(&self) -> Option<firefly_map::ObservedSpace> {
-        self.snapshot.as_ref().map(|s| s.observed.clone())
-    }
     pub fn observe_local(&mut self, snapshot: LocalSnapshot) -> Result<()> {
         let result = self.accept(snapshot);
-        if let Err(error) = &result {
-            self.fault.get_or_insert_with(|| error.clone());
-        }
+        self.faulted |= result.is_err();
         result
     }
     fn accept(&mut self, snapshot: LocalSnapshot) -> Result<()> {
-        if !snapshot.timestamp.is_finite() || snapshot.timestamp < 0. || !snapshot.bounds.valid() {
+        if !snapshot.last_observed_at.is_finite()
+            || snapshot.last_observed_at < 0.
+            || !snapshot.map.measured_at.is_finite()
+            || snapshot.last_observed_at > snapshot.map.measured_at
+            || !snapshot.map.bounds.valid()
+        {
             return Err(invalid("invalid local collision snapshot"));
         }
         if let Some(old) = &self.snapshot
-            && (snapshot.sequence <= old.sequence || snapshot.timestamp < old.timestamp)
+            && (snapshot.sequence <= old.sequence
+                || snapshot.map.measured_at < old.map.measured_at
+                || snapshot.last_observed_at < old.last_observed_at)
         {
             return Ok(());
         }
         self.snapshot = Some(snapshot);
         Ok(())
     }
-    pub fn status(&self, odometry: &OdomMessage, now: Instant, timeout: Duration) -> MapStatus {
-        if self.fault.is_some() {
+    /// Move the view and install the latest fully covering snapshot using the same odometry.
+    #[fastrace::trace]
+    pub fn synchronize(
+        &self,
+        map: &mut GridMap,
+        odometry: &OdomMessage,
+        now: Instant,
+        timeout: Duration,
+    ) -> MapStatus {
+        map.move_ring_buffer(Vector3::new(
+            odometry.position_x,
+            odometry.position_y,
+            odometry.position_z,
+        ));
+        if self.faulted {
             return MapStatus::Unavailable;
         }
         let Some(snapshot) = &self.snapshot else {
             return MapStatus::Waiting;
         };
-        if odometry.timestamp - snapshot.timestamp > timeout.as_secs_f64()
+        if odometry.timestamp - snapshot.last_observed_at > timeout.as_secs_f64()
             || now.saturating_duration_since(snapshot.fused_at) > timeout
         {
-            MapStatus::Unavailable
-        } else if self
-            .required
-            .is_some_and(|required| snapshot.bounds.contains(&required))
-            && snapshot.timestamp <= odometry.timestamp
-        {
-            MapStatus::Ready
-        } else {
-            MapStatus::Waiting
-        }
-    }
-
-    /// Move the planning window before checking depth-map coverage.
-    pub fn prepare_region(
-        &mut self,
-        map: &mut GridMap,
-        odometry: &OdomMessage,
-        rolling: bool,
-    ) -> Bounds {
-        if rolling {
-            map.move_ring_buffer(Vector3::new(
-                odometry.position_x,
-                odometry.position_y,
-                odometry.position_z,
-            ));
+            return MapStatus::Unavailable;
         }
         let low = map.origin();
-        let high = low + Vector3::from(map.dims().map(|d| d as f64 * map.resolution()));
         let required = Bounds {
             min: low.into(),
-            max: high.into(),
+            max: (low + map.size()).into(),
         };
-        self.required = Some(required);
-        required
-    }
-    #[fastrace::trace]
-    pub fn apply(
-        &mut self,
-        map: &mut GridMap,
-        odometry: &OdomMessage,
-        rolling: bool,
-    ) -> Result<()> {
-        let required = self.prepare_region(map, odometry, rolling);
-        if let Some(reason) = &self.fault {
-            return Err(reason.clone().with_operation("apply depth map"));
+        if snapshot.map.measured_at > odometry.timestamp || !snapshot.map.bounds.contains(&required)
+        {
+            return MapStatus::Waiting;
         }
-        let snapshot = self
-            .snapshot
-            .as_ref()
-            .ok_or_else(|| invalid("depth map absent"))?;
-        if !snapshot.bounds.contains(&required) {
-            return Err(invalid("depth map coverage mismatch"));
-        }
-        map.set_collision_snapshot(snapshot.collision.clone())?;
-        Ok(())
-    }
-}
-// Source cells use an exact lattice; round-off must not expand them by one voxel.
-fn lattice_coordinate(value: f64) -> f64 {
-    if (value - value.round()).abs() <= 1e-8 {
-        value.round()
-    } else {
-        value
+        map.set_online_snapshot(
+            snapshot.map.collision.clone(),
+            snapshot.map.observed.clone(),
+        );
+        MapStatus::Ready
     }
 }
 fn invalid(message: &str) -> Error {
@@ -174,26 +115,28 @@ mod tests {
 
     fn snapshot(sequence: u64, cells: Vec<Bounds>) -> LocalSnapshot {
         LocalSnapshot {
-            collision: CollisionSnapshot::from_runs(
-                [0; 3],
-                [4; 3],
-                cells
-                    .into_iter()
-                    .map(|cell| cell.voxel_bounds(Vector3::zeros(), 1.)),
-            ),
-            observed: firefly_map::ObservedSpace::from_buffer(
-                1.,
-                [0; 3],
-                [4; 3],
-                [0; 3],
-                &[false; 64],
-            ),
-            bounds: Bounds {
-                min: [0.; 3],
-                max: [4.; 3],
+            map: DepthSnapshot {
+                measured_at: 1.,
+                collision: firefly_map::CollisionSnapshot::from_runs(
+                    [0; 3],
+                    [4; 3],
+                    cells
+                        .into_iter()
+                        .map(|cell| cell.voxel_bounds(Vector3::zeros(), 1.)),
+                ),
+                observed: firefly_map::ObservedSpace::from_voxels(
+                    1.,
+                    firefly_map::VoxelBox::centered([2; 3], [4; 3]).unwrap(),
+                    [],
+                )
+                .unwrap(),
+                bounds: Bounds {
+                    min: [0.; 3],
+                    max: [4.; 3],
+                },
             },
             sequence,
-            timestamp: 1.,
+            last_observed_at: 1.,
             fused_at: Instant::now(),
         }
     }
@@ -215,19 +158,22 @@ mod tests {
                 }],
             ))
             .unwrap();
-        input.apply(&mut map, &nav, true).unwrap();
+        assert_eq!(
+            input.synchronize(&mut map, &nav, Instant::now(), Duration::from_secs(1)),
+            MapStatus::Ready
+        );
         let point = Vector3::new(0.5, 1.5, 1.5);
         assert!(map.is_occupied_inflated(point));
         let mut away = nav;
         away.position_x = 6.;
-        input.prepare_region(&mut map, &away, true);
         assert_eq!(
-            input.status(&away, Instant::now(), Duration::from_secs(1)),
+            input.synchronize(&mut map, &away, Instant::now(), Duration::from_secs(1)),
             MapStatus::Waiting
         );
-        input.prepare_region(&mut map, &nav, true);
-        assert!(map.is_occupied_inflated(point));
-        input.apply(&mut map, &nav, true).unwrap();
+        assert_eq!(
+            input.synchronize(&mut map, &nav, Instant::now(), Duration::from_secs(1)),
+            MapStatus::Ready
+        );
         assert!(map.is_occupied_inflated(point));
     }
 
@@ -249,13 +195,22 @@ mod tests {
             max: [3., 2., 2.],
         };
         input.observe_local(snapshot(1, vec![a, b])).unwrap();
-        input.apply(&mut map, &nav, true).unwrap();
+        assert_eq!(
+            input.synchronize(&mut map, &nav, Instant::now(), Duration::from_secs(1)),
+            MapStatus::Ready
+        );
         input.observe_local(snapshot(2, vec![b])).unwrap();
-        input.apply(&mut map, &nav, true).unwrap();
+        assert_eq!(
+            input.synchronize(&mut map, &nav, Instant::now(), Duration::from_secs(1)),
+            MapStatus::Ready
+        );
         assert!(!map.is_occupied_inflated(Vector3::new(0.5, 1.5, 1.5)));
         assert!(map.is_occupied_inflated(Vector3::new(2.5, 1.5, 1.5)));
         input.observe_local(snapshot(3, vec![])).unwrap();
-        input.apply(&mut map, &nav, true).unwrap();
+        assert_eq!(
+            input.synchronize(&mut map, &nav, Instant::now(), Duration::from_secs(1)),
+            MapStatus::Ready
+        );
         assert!(!map.is_occupied_inflated(Vector3::new(2.5, 1.5, 1.5)));
         assert!(map.is_occupied_inflated(Vector3::new(1.5, 1.5, 1.5)));
     }
@@ -268,23 +223,22 @@ mod tests {
         let mut stale = snapshot(1, vec![]);
         stale.fused_at -= Duration::from_secs(2);
         input.observe_local(stale).unwrap();
-        input.prepare_region(&mut map, &nav, true);
         input.observe_local(snapshot(1, vec![])).unwrap();
         assert_eq!(
-            input.status(&nav, Instant::now(), Duration::from_secs(1)),
+            input.synchronize(&mut map, &nav, Instant::now(), Duration::from_secs(1)),
             MapStatus::Unavailable
         );
         input.observe_local(snapshot(2, vec![])).unwrap();
         assert_eq!(
-            input.status(&nav, Instant::now(), Duration::from_secs(1)),
+            input.synchronize(&mut map, &nav, Instant::now(), Duration::from_secs(1)),
             MapStatus::Ready
         );
         let mut invalid = snapshot(3, vec![]);
-        invalid.bounds.min[0] = f64::NAN;
+        invalid.map.bounds.min[0] = f64::NAN;
         assert!(input.observe_local(invalid).is_err());
         input.observe_local(snapshot(4, vec![])).unwrap();
         assert_eq!(
-            input.status(&nav, Instant::now(), Duration::from_secs(1)),
+            input.synchronize(&mut map, &nav, Instant::now(), Duration::from_secs(1)),
             MapStatus::Unavailable
         );
     }
