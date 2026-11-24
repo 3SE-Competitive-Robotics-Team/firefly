@@ -129,7 +129,10 @@ impl Watchdog<'_> {
             return Ok(());
         };
         let state = self.controllers.join(&name).join("state");
-        if fs::read_to_string(state).is_ok_and(|state| state.trim_end() == "not attached") {
+        // The A733 can retain its last configured link state after configfs unbinds the gadget.
+        if fs::read_to_string(state)
+            .is_ok_and(|state| matches!(state.trim_end(), "not attached" | "configured"))
+        {
             bind(&binding, &name)?;
             eprintln!("watchdog：ADB 已重新绑定到 {name}");
         }
@@ -249,6 +252,7 @@ mod tests {
             tick(w);
             assert_eq!(fs::read(&udc).unwrap(), b"\n");
             drop(lock);
+            fs::write(w.controllers.join("test-udc/state"), "configured\n").unwrap();
             tick(w);
             assert_eq!(fs::read(&udc).unwrap(), b"test-udc\n");
             let bound = modified(&udc).unwrap();
@@ -266,7 +270,7 @@ mod tests {
                 assert_eq!(fs::read(&udc).unwrap(), b"\n");
             };
             let state = w.controllers.join("test-udc/state");
-            for usb_state in ["configured", "suspended", "unknown", ""] {
+            for usb_state in ["suspended", "unknown", ""] {
                 fs::write(&state, usb_state).unwrap();
                 untouched();
             }
@@ -305,6 +309,14 @@ mod tests {
             fs::remove_file(&udc).unwrap();
             tick(w);
             assert!(!udc.exists());
+        });
+    }
+
+    #[test]
+    fn detached_controller_rebinds_ready_adb() {
+        fixture("detached", |w| {
+            tick(w);
+            assert_eq!(fs::read(w.gadget.join("UDC")).unwrap(), b"test-udc\n");
         });
     }
 
