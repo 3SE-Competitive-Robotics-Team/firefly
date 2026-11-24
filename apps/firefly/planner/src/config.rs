@@ -46,8 +46,11 @@ mod tests {
     #[test]
     fn registered_field_loads_only_the_configured_asset_at_its_surveyed_pose() {
         use sha2::{Digest, Sha256};
-        let path = "apps/firefly/planner/maps/gate.ffmap";
-        let digest = format!("{:x}", Sha256::digest(include_bytes!("../maps/gate.ffmap")));
+        let path = "apps/firefly/planner/tests/fixtures/registered-field.ffmap";
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(include_bytes!("../tests/fixtures/registered-field.ffmap"))
+        );
         let toml = format!(
             r#"[mapping.field]
 path = "{path}"
