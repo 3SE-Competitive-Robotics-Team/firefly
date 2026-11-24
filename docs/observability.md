@@ -351,11 +351,11 @@ before the flight with `systemctl start firefly-mimir.service`.
 | `power/state`, `power/meter`, `power/extrema` | Betaflight battery state, cell count, voltage (V), current (A), charge (mAh), minimum sampled ADC voltage and peak sampled ADC current since the previous transmitted snapshot. |
 | `temperature` | Cached MCU die temperature (°C), refreshed by Betaflight at 1 Hz. |
 
-The firmware sends one 68-byte snapshot per 100 ms slot (680 B/s nominal).
+The firmware sends one 68-byte snapshot per 200 ms slot (340 B/s nominal).
 It drains incoming commands first, reserves eight IMU frames of USB TX space and
 skips congested slots. ADC extrema survive these skipped slots. The USB thread in
 pilot offers whole snapshots to a two-slot queue with `try_send`. A separate thread
-publishes at most 120 scalar messages/s (15,360 B/s of IPC payload) at nominal rate.
+publishes at most 60 scalar messages/s (7,680 B/s of IPC payload) at nominal rate.
 Sensor availability bits become NaN for unavailable measurements. Flight controller
 event times and capture times use the same wrapping µs counter. The slot resets
 on a new handshake. Mimir preserves the groups and gaps in each recorded run.

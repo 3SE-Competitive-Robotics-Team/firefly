@@ -74,7 +74,7 @@ def test_pilot_duplex_and_stale_sticks():
                     if batch:
                         os.write(master, batch)
                     drain_imu()
-                    slot = int(elapsed * 10)
+                    slot = int(elapsed * 5)
                     if slot > 0 and (not slots or slot > slots[-1]):
                         slots.append(slot)
                         status = packet(struct.pack(
