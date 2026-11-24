@@ -157,7 +157,7 @@ struct Pending {
 pub struct FrameReader<R: Read> {
     inner: R,
     buffer: Vec<u8>,
-    start: usize,
+    unread: std::ops::Range<usize>,
     pending: Option<Pending>,
     dropped: u64,
 }
@@ -167,7 +167,7 @@ impl<R: Read> FrameReader<R> {
         Self {
             inner,
             buffer: Vec::new(),
-            start: 0,
+            unread: 0..0,
             pending: None,
             dropped: 0,
         }
@@ -192,24 +192,15 @@ impl<R: Read> FrameReader<R> {
     /// 底层读取失败、流提前结束或帧头/消息体非法。
     pub fn read_raw(&mut self) -> io::Result<(Header, Vec<u8>)> {
         loop {
-            self.compact();
-            let available = self.buffer.len().saturating_sub(self.start);
-            if available < crate::protocol::HEADER_LEN {
-                self.fill(crate::protocol::HEADER_LEN)?;
-                continue;
-            }
+            self.fill(crate::protocol::HEADER_LEN)?;
             let mut raw = [0_u8; crate::protocol::HEADER_LEN];
-            raw.copy_from_slice(&self.buffer[self.start..self.start + crate::protocol::HEADER_LEN]);
+            raw.copy_from_slice(&self.buffer[self.unread.clone()][..crate::protocol::HEADER_LEN]);
             let header = decode_header(&raw)?;
             let frame_len = crate::protocol::HEADER_LEN + header.payload_len as usize;
-            if self.buffer.len().saturating_sub(self.start) < frame_len {
-                self.fill(frame_len)?;
-                continue;
-            }
-            let payload = self.buffer
-                [self.start + crate::protocol::HEADER_LEN..self.start + frame_len]
-                .to_vec();
-            self.start += frame_len;
+            self.fill(frame_len)?;
+            let payload =
+                self.buffer[self.unread.clone()][crate::protocol::HEADER_LEN..frame_len].to_vec();
+            self.unread.start += frame_len;
             if let Some(result) = self.accept_raw(header, payload) {
                 return Ok(result);
             }
@@ -288,38 +279,34 @@ impl<R: Read> FrameReader<R> {
         ))
     }
 
-    fn compact(&mut self) {
-        if self.start == 0 {
-            return;
-        }
-        self.buffer.drain(..self.start);
-        self.start = 0;
-    }
-
     fn fill(&mut self, wanted: usize) -> io::Result<()> {
-        while self.buffer.len().saturating_sub(self.start) < wanted {
-            let available = self.buffer.len().saturating_sub(self.start);
-            let need = wanted - available;
-            let start = self.buffer.len();
-            // FunctionFS 端点要求读缓冲不小于端点最大包长（512B），否则返回
-            // EOVERFLOW；按 64 KiB 读，顺便省掉「临时块 + extend」的第二次拷贝。
-            self.buffer.resize(start + need.max(64 * 1024), 0);
-            let read = match self.inner.read(&mut self.buffer[start..]) {
-                Ok(read) => read,
-                Err(error) => {
-                    // Only bytes returned by a successful read belong to the stream.
-                    // Keep the prior prefix intact when callers retry a transient error.
-                    self.buffer.truncate(start);
-                    return Err(error);
-                }
-            };
-            self.buffer.truncate(start + read);
+        const USB_READ_SIZE: usize = 64 * 1024;
+        if self.unread.len() >= wanted {
+            return Ok(());
+        }
+        if self.unread.start > 0 {
+            self.buffer.copy_within(self.unread.clone(), 0);
+            self.unread = 0..self.unread.len();
+        }
+        if self.buffer.is_empty() {
+            // One partial fragment can precede a full FunctionFS endpoint read.
+            self.buffer.resize(
+                USB_READ_SIZE + crate::protocol::HEADER_LEN + MAX_FRAGMENT,
+                0,
+            );
+        }
+        while self.unread.len() < wanted {
+            let start = self.unread.end;
+            let read = self
+                .inner
+                .read(&mut self.buffer[start..start + USB_READ_SIZE])?;
             if read == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "hil stream closed",
                 ));
             }
+            self.unread.end += read;
         }
         Ok(())
     }
@@ -459,6 +446,10 @@ mod tests {
             assert_eq!(frame.header.session, 42);
             assert_eq!(reader.read_frame().unwrap().message, Message::Ping(123));
             assert_eq!(reader.dropped(), 0);
+            assert_eq!(
+                reader.read_raw().unwrap_err().kind(),
+                io::ErrorKind::UnexpectedEof
+            );
         }
     }
 

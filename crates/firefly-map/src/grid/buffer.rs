@@ -67,6 +67,10 @@ impl<T: Copy> Buffer<T> {
 }
 
 impl<T: Copy + PartialEq> Buffer<T> {
+    pub(super) fn is_known_uniform(&self, value: T) -> bool {
+        self.pages.iter().all(|page| page.uniform == Some(value))
+    }
+
     /// Known uniform suffix of the containing page, clipped to the logical buffer.
     pub(super) fn uniform_len(&self, index: usize, value: T) -> usize {
         if self.pages[index / PAGE_LEN].uniform.as_ref() == Some(&value) {

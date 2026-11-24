@@ -4,7 +4,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use firefly_error::{Error, ErrorKind, Result};
-use firefly_map::{GridMap, VoxelState};
+use firefly_map::GridMap;
 use firefly_pubsub::node::create_node;
 use firefly_pubsub::viz::{VOXELS_MAX, VizPublisher, kind};
 use nalgebra::Vector3;
@@ -175,7 +175,7 @@ impl Renderer {
 
     /// 局部窗口内的占据体素索引（`center` 为空则全量栅格），附带网格尺寸与原点。
     ///
-    /// 局部窗口以 `center` 为中心取 `local_update_range` 内的格子，限制传输量。
+    /// 局部窗口以 `center` 为中心，沿各轴取前后 4 米。
     fn occupied_indices(
         map: &GridMap,
         center: Option<Vector3<f64>>,
@@ -193,16 +193,11 @@ impl Renderer {
             },
             None => ([0, 0, 0], [dims[0] - 1, dims[1] - 1, dims[2] - 1]),
         };
-        for x in lo[0]..=hi[0] {
-            for y in lo[1]..=hi[1] {
-                for z in lo[2]..=hi[2] {
-                    if map.state([x, y, z]) == VoxelState::Occupied {
-                        indices.push([x as i32, y as i32, z as i32]);
-                    }
-                }
-            }
-        }
-        let size = Self::coarsen_display_voxels(indices, size);
+        map.visit_occupied(lo, hi.map(|i| i + 1), |index| {
+            indices.push(index.map(|i| i as i32));
+        });
+        let size =
+            Self::coarsen_display_voxels(indices, size, lo.map(|i| i as i32), hi.map(|i| i as i32));
         (size, at)
     }
 
@@ -210,13 +205,38 @@ impl Renderer {
     pub(super) fn coarsen_display_voxels(
         indices: &mut Vec<[i32; 3]>,
         mut size: [f32; 3],
+        mut low: [i32; 3],
+        mut high: [i32; 3],
     ) -> [f32; 3] {
-        while indices.len() > VOXELS_MAX {
-            for index in indices.iter_mut() {
-                *index = index.map(|value| value.div_euclid(2));
-            }
+        if indices.len() <= VOXELS_MAX {
             indices.sort_unstable();
-            indices.dedup();
+            return size;
+        }
+        let mut words = Vec::new();
+        while indices.len() > VOXELS_MAX {
+            low = low.map(|v| v.div_euclid(2));
+            high = high.map(|v| v.div_euclid(2));
+            let dims: [usize; 3] = std::array::from_fn(|i| (high[i] - low[i] + 1) as usize);
+            words.clear();
+            words.resize(dims.iter().product::<usize>().div_ceil(64), 0u64);
+            for cell in indices.drain(..) {
+                let [x, y, z]: [usize; 3] =
+                    std::array::from_fn(|i| (cell[i].div_euclid(2) - low[i]) as usize);
+                let at = (x * dims[1] + y) * dims[2] + z;
+                words[at / 64] |= 1 << (at % 64);
+            }
+            for (word, &bits) in words.iter().enumerate() {
+                let mut bits = bits;
+                while bits != 0 {
+                    let at = word * 64 + bits.trailing_zeros() as usize;
+                    indices.push([
+                        low[0] + (at / dims[2] / dims[1]) as i32,
+                        low[1] + (at / dims[2] % dims[1]) as i32,
+                        low[2] + (at % dims[2]) as i32,
+                    ]);
+                    bits &= bits - 1;
+                }
+            }
             size = size.map(|value| value * 2.);
         }
         size
@@ -311,7 +331,7 @@ impl Renderer {
         Ok(())
     }
 
-    /// `center` 周围 `local_update_range` 对应的窗口索引范围（闭区间，已裁剪
+    /// `center` 周围显示范围对应的窗口索引（闭区间，已裁剪
     /// 到栅格内）；越界返回 `None`。
     fn window_bounds(map: &GridMap, center: Vector3<f64>) -> Option<([usize; 3], [usize; 3])> {
         let range = Vector3::new(

@@ -165,7 +165,12 @@ fn dense_display_preserves_all_occupied_volume_within_message_budget() {
         .flat_map(|x| (-40..=40).flat_map(move |y| (-40..=40).map(move |z| [x, y, z])))
         .collect();
     let mut coarse = fine.clone();
-    let size = crate::voxel_display::Renderer::coarsen_display_voxels(&mut coarse, [0.1; 3]);
+    let size = crate::voxel_display::Renderer::coarsen_display_voxels(
+        &mut coarse,
+        [0.1; 3],
+        [-40; 3],
+        [40; 3],
+    );
     assert!(coarse.len() <= VOXELS_MAX);
     let scale = (size[0] / 0.1).round() as i32;
     assert!(scale > 1);

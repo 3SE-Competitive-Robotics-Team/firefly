@@ -55,6 +55,36 @@ impl GridMap {
         }
     }
 
+    /// Visit each occupied window index once, clipped to the half-open box `[low, end)`.
+    pub fn visit_occupied(
+        &self,
+        low: [usize; 3],
+        end: [usize; 3],
+        mut visit: impl FnMut([usize; 3]),
+    ) {
+        let end = std::array::from_fn(|i| end[i].min(self.dims[i]));
+        if (0..3).any(|i| low[i] >= end[i]) {
+            return;
+        }
+        if self.occupancy.is_known_uniform(false) {
+            if let Some(snapshot) = &self.collision {
+                snapshot.visit_occupied(self.global_index(low), self.global_index(end), |global| {
+                    visit(std::array::from_fn(|i| (global[i] - self.low[i]) as usize));
+                });
+            }
+            return;
+        }
+        for x in low[0]..end[0] {
+            for y in low[1]..end[1] {
+                for z in low[2]..end[2] {
+                    if self.state([x, y, z]) == VoxelState::Occupied {
+                        visit([x, y, z]);
+                    }
+                }
+            }
+        }
+    }
+
     /// 清除当前派生占据，保留世界锚定先验与虚拟墙。
     pub fn clear_observations(&mut self) {
         self.collision = None;
@@ -117,6 +147,51 @@ impl GridMap {
 mod tests {
     use super::*;
     use crate::grid::{GridMapBuilder, VoxelState};
+
+    #[test]
+    fn occupied_window_matches_scalar_queries_after_rolling_and_adding_priors() {
+        let mut map = GridMapBuilder::new(1., [150, 10, 8])
+            .with_obstacles_inflation(0.)
+            .build()
+            .unwrap();
+        map.move_ring_buffer(Vector3::new(1., 2., -1.));
+        let snapshot = crate::CollisionSnapshot::from_runs(
+            [-70, -6, -4],
+            [137, 13, 6],
+            [([-68, -4, -4], [4, 1, 0]), ([-13, -1, -1], [77, 3, 2])],
+        );
+        map.set_collision_snapshot(snapshot).unwrap();
+        let compare = |map: &GridMap| {
+            for (low, end) in [
+                ([0; 3], [usize::MAX; 3]),
+                ([6, 1, 2], [125, 7, 6]),
+                ([149, 0, 0], [150, 10, 8]),
+                ([5; 3], [5; 3]),
+                ([usize::MAX; 3], [1; 3]),
+            ] {
+                let mut expected = Vec::new();
+                for x in low[0]..end[0].min(map.dims()[0]) {
+                    for y in low[1]..end[1].min(map.dims()[1]) {
+                        for z in low[2]..end[2].min(map.dims()[2]) {
+                            if map.state([x, y, z]) == VoxelState::Occupied {
+                                expected.push([x, y, z]);
+                            }
+                        }
+                    }
+                }
+                let mut actual = Vec::new();
+                map.visit_occupied(low, end, |index| actual.push(index));
+                actual.sort_unstable();
+                assert_eq!(actual, expected);
+            }
+        };
+        compare(&map);
+        map.set_prior_occupied([149, 2, 3]);
+        map.set_state([15, 2, 2], VoxelState::Occupied);
+        compare(&map);
+        map.clear_observations();
+        compare(&map);
+    }
 
     #[test]
     fn sensor_snapshot_replaces_observations_and_preserves_prior_and_solver_view() {
