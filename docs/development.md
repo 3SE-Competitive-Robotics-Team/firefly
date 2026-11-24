@@ -40,6 +40,17 @@ cargo xtask deploy-hil
 cargo xtask hil configs/mission-square.toml
 ```
 
+板端部署会安装并启用 `firefly-usb-watchdog.service`。开机时，原厂 `adbd.service` 准备 ADB 和 FunctionFS。随后 systemd 停止原厂的 UDC 轮询脚本，在 CPU 0 上启动一个 `hil-gadget watchdog`。用 `systemctl status firefly-usb-watchdog` 查看服务，用 `journalctl -b -t firefly-hil-gadget` 查看切换和重绑记录。
+
+看门狗每 5 秒尝试取得 USB 切换锁。锁忙时等下一轮。持锁时按以下规则操作。
+
+| 板端状态 | 看门狗动作 |
+|---|---|
+| HIL 已配置 | 进入 HIL 或看门狗重新启动后有 60 秒宽限。观察到新的主机心跳后重新计时。连续 60 秒没有更新，恢复实机进程清单和 ADB。 |
+| 本次开机的显式切换中断 | 取得锁后观察 60 秒，仍有未完成标记就执行同一恢复流程。 |
+| 唯一配置仅链接 `ffs.adb`，`ep1` 和 `ep2` 就绪，`UDC` 明确为空，唯一控制器报告 `not attached` | 将控制器名称写入 `UDC`，回读确认。飞行进程和 `adbd` 持续运行。 |
+| ADB 仍绑定、USB 挂起、配置混合、读取失败或端点未就绪 | 保持现状。ADB 可以长期空闲。 |
+
 SIL 和 HIL 都在录制结束后逐架次评分。要重新评分，向 `target/release/firefly-verify --transport sil` 或 `--transport hil` 传入对应的运行目录。评分器将 JSON 写到标准输出，通过时返回 0。[运行归档与回放](mimir.md#录制与读取)
 
 ### 板上任务服务

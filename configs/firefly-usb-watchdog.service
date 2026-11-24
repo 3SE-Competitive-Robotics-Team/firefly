@@ -1,0 +1,20 @@
+[Unit]
+Description=Firefly USB gadget watchdog
+Wants=adbd.service
+After=adbd.service
+PartOf=adbd.service
+
+[Service]
+Type=exec
+CPUAffinity=0
+# adbd.service has finished configuring FunctionFS. Retire its background UDC polling shell.
+ExecStartPre=/usr/sbin/start-stop-daemon --stop --name adb_conf.sh --retry TERM/3/KILL/1 --oknodo
+ExecStart=/opt/firefly/bin/hil-gadget watchdog
+SyslogIdentifier=firefly-hil-gadget
+# A restored adbd and its active shells outlive watchdog upgrades.
+KillMode=process
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target adbd.service

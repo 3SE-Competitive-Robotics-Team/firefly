@@ -4,6 +4,9 @@ mod setup;
 #[cfg(any(target_os = "linux", test))]
 mod transition;
 
+#[cfg(any(target_os = "linux", test))]
+mod watchdog;
+
 use std::process::ExitCode;
 
 /// 管理板端 USB HIL gadget
