@@ -42,6 +42,10 @@ impl EvidenceBuffer {
             self.0[address] = evidence;
         }
     }
+    #[cfg(feature = "depth")]
+    pub(crate) fn mark_free(&mut self, mask: &[u64], measured_at: f64) {
+        self.0.fill_masked(mask, Evidence::Free(measured_at));
+    }
     #[must_use]
     pub(crate) fn get(&self, address: usize) -> Evidence {
         self.0[address]

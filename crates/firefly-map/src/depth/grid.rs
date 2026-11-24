@@ -1,7 +1,7 @@
 use super::{
     DepthImage, FrameStats, MappingParameters,
     config::{DepthSampling, invalid, logit},
-    raycast::RayCaster,
+    raycast::FrameRays,
 };
 use crate::{Evidence, ObservedSpace, VoxelBox, observed::EvidenceBuffer};
 use firefly_error::Result;
@@ -12,15 +12,6 @@ mod window;
 
 const OBSTACLE_FLAG: u16 = 32767;
 type Index = Vector3<i32>;
-
-#[derive(Default)]
-struct RayVotes {
-    index: Index,
-    hits: usize,
-    misses: usize,
-    saw_endpoint: bool,
-    traversed: bool,
-}
 
 /// Local probabilistic map. Call depth reception and timer callbacks sequentially.
 /// The raw buffer order matches C++: x is the fastest-varying coordinate.
@@ -42,8 +33,8 @@ pub(super) struct GridMap {
     evidence: EvidenceBuffer,
     inflate: Vec<u16>,
     collision_bits: crate::grid::buffer::Buffer<u64>,
-    vote_slots: Vec<u32>,
-    frame_votes: Vec<RayVotes>,
+    rays: FrameRays,
+    inflation_candidates: Vec<usize>,
     projected: Vec<Vector3<f64>>,
     camera_position: Vector3<f64>,
     camera_rotation: Matrix3<f64>,
@@ -98,6 +89,8 @@ impl GridMap {
         let capacity = Self::capacity(size)?;
         let inf_capacity = Self::capacity(inf_size)?;
         let clamp_min_log = logit(parameters.p_min);
+        let min_occupancy_log = logit(parameters.p_occ);
+        let misses_saturate_at_free = parameters.p_miss <= 0.5 && clamp_min_log < min_occupancy_log;
         // `initMap` camera-to-body rotation, before extrinsicCallback overrides it.
         let rotation = Matrix3::new(0., 0., 1., -1., 0., 0., 0., -1., 0.);
         Ok(Self {
@@ -106,7 +99,7 @@ impl GridMap {
             prob_miss_log: logit(parameters.p_miss),
             clamp_min_log,
             clamp_max_log: logit(parameters.p_max),
-            min_occupancy_log: logit(parameters.p_occ),
+            min_occupancy_log,
             parameters,
             resolution_inv,
             size,
@@ -118,8 +111,8 @@ impl GridMap {
             evidence: EvidenceBuffer::new(capacity),
             inflate: vec![0; inf_capacity],
             collision_bits: crate::grid::buffer::Buffer::new(0, inf_capacity.div_ceil(64)),
-            vote_slots: vec![0; capacity],
-            frame_votes: Vec::new(),
+            rays: FrameRays::new(capacity, misses_saturate_at_free),
+            inflation_candidates: Vec::new(),
             projected: Vec::new(),
             camera_position: Vector3::zeros(),
             camera_rotation: Matrix3::identity(),
@@ -299,7 +292,7 @@ impl GridMap {
             self.raycast_process(measured_at);
             let voted = Instant::now();
             raycast = voted - moved;
-            voted_voxels = self.frame_votes.len();
+            voted_voxels = self.rays.cell_count;
             self.clear_and_inflate_local_map();
             inflation = voted.elapsed();
         }
@@ -363,75 +356,61 @@ impl GridMap {
         Ok(())
     }
 
-    fn votes_for(&mut self, index: Index) -> &mut RayVotes {
-        let address = self.address(index);
-        let slot = self.vote_slots[address] as usize;
-        // A ring slot is valid only if its entry in this frame names this world voxel.
-        if self.frame_votes.get(slot).is_some_and(|v| v.index == index) {
-            return &mut self.frame_votes[slot];
-        }
-        let slot = self.frame_votes.len();
-        self.vote_slots[address] = u32::try_from(slot).expect("map capacity fits i32");
-        self.frame_votes.push(RayVotes {
-            index,
-            ..Default::default()
-        });
-        &mut self.frame_votes[slot]
-    }
-
     #[fastrace::trace]
     fn raycast_process(&mut self, measured_at: f64) {
-        self.frame_votes.clear();
+        self.rays.clear();
+        let size = self.size;
+        let low = self.window.expect("rays require a current window").low();
+        // Inside a window of one ring period each axis can wrap at most once.
+        let base = Index::from_fn(|i, _| {
+            let low = i32::try_from(low[i]).expect("validated mapper coordinates fit i32");
+            low - low.rem_euclid(size[i])
+        });
+        let address = |index: Index| {
+            let local = (index - base).zip_map(&size, |v, n| if v >= n { v - n } else { v });
+            ((local.z * size.y + local.y) * size.x + local.x) as usize
+        };
         for i in 0..self.projected.len() {
             let mut point = self.projected[i];
             let occupied = self.is_in_buffer(point);
             if !occupied {
                 point = self.closest_point_in_map(point);
             }
-            let votes = self.votes_for(self.position_to_index(point));
-            if occupied {
-                votes.hits += 1;
-            } else {
-                votes.misses += 1;
-            }
-            if std::mem::replace(&mut votes.saw_endpoint, true) {
-                continue;
-            }
-            let ray = RayCaster::new(
-                point / self.parameters.resolution,
-                self.camera_position / self.parameters.resolution,
-            );
-            for cell in ray {
-                let votes = self.votes_for(cell);
-                votes.misses += 1;
-                if std::mem::replace(&mut votes.traversed, true) {
-                    break;
-                }
-            }
+            let start = point / self.parameters.resolution;
+            self.rays
+                .endpoint(address(start.map(|v| v.floor() as i32)), start, occupied);
         }
-        for i in 0..self.frame_votes.len() {
-            let votes = &self.frame_votes[i];
-            let address = self.address(votes.index);
-            let hit = votes.hits;
-            let update = if hit >= votes.misses {
+        self.rays
+            .trace(self.camera_position / self.parameters.resolution, address);
+        self.inflation_candidates.clear();
+        for i in 0..self.rays.updates.len() {
+            let address = self.rays.updates[i];
+            let (hit, misses) = self.rays.votes(address);
+            let update = if hit >= misses {
                 self.prob_hit_log
             } else {
                 self.prob_miss_log
             };
             self.reset_expired_obstacle(address, measured_at);
+            let was_occupied = self.occupancy[address] >= self.min_occupancy_log;
             self.occupancy[address] =
                 (self.occupancy[address] + update).clamp(self.clamp_min_log, self.clamp_max_log);
-            if self.occupancy[address] >= self.min_occupancy_log {
+            if self.occupancy[address] == self.clamp_min_log {
+                self.rays.saturated_free(address);
+            }
+            let occupied = self.occupancy[address] >= self.min_occupancy_log;
+            if occupied || was_occupied {
+                self.inflation_candidates.push(address);
+            }
+            if occupied || hit > 0 {
+                self.rays.visited[address / 64] &= !(1 << (address % 64));
+            }
+            if occupied {
                 if hit > 0 && update > 0. {
                     self.evidence.set(address, Evidence::Occupied(measured_at));
                 }
-            } else {
-                let evidence = if hit == 0 {
-                    Evidence::Free(measured_at)
-                } else {
-                    Evidence::Unknown
-                };
-                self.evidence.set(address, evidence);
+            } else if hit > 0 {
+                self.evidence.set(address, Evidence::Unknown);
             }
         }
         // Rays start at the sensor, but upstream's reverse iterator excludes that
@@ -439,26 +418,20 @@ impl GridMap {
         if !self.projected.is_empty() {
             let address = self.address(self.position_to_index(self.camera_position));
             if self.occupancy[address] < self.min_occupancy_log {
-                self.evidence.set(address, Evidence::Free(measured_at));
+                self.rays.visited[address / 64] |= 1 << (address % 64);
             }
         }
+        self.evidence.mark_free(&self.rays.visited, measured_at);
     }
 
     #[fastrace::trace]
     fn clear_and_inflate_local_map(&mut self) {
-        for i in 0..self.frame_votes.len() {
-            let id = self.frame_votes[i].index;
-            let address = self.address(id);
-            let inf_address = self.inf_address(id);
-            if self.inflate[inf_address] < OBSTACLE_FLAG
-                && self.occupancy[address] >= self.min_occupancy_log
-            {
-                self.change_inf_buf(true, id);
-            }
-            if self.inflate[inf_address] >= OBSTACLE_FLAG
-                && self.occupancy[address] < self.min_occupancy_log
-            {
-                self.change_inf_buf(false, id);
+        for i in 0..self.inflation_candidates.len() {
+            let address = self.inflation_candidates[i];
+            let id = self.address_to_index(address);
+            let occupied = self.occupancy[address] >= self.min_occupancy_log;
+            if occupied != (self.inflate[self.inf_address(id)] >= OBSTACLE_FLAG) {
+                self.change_inf_buf(occupied, id);
             }
         }
     }
@@ -478,6 +451,7 @@ impl GridMap {
             let id = self.position_to_index(point);
             let address = self.address(id);
             self.occupancy[address] = self.clamp_max_log;
+            self.rays.require_update(address);
             self.evidence.set(address, Evidence::Unknown);
             if self.inflate[self.inf_address(id)] < OBSTACLE_FLAG
                 && self.occupancy[address] >= self.min_occupancy_log
