@@ -1,4 +1,4 @@
-use crate::{RUNNING, matrix};
+use crate::{RUNNING, matrix, matrix_status};
 use firefly_pubsub::sticks::{STICKS_BUFFER_SIZE, STICKS_TOPIC, SticksMessage};
 use firefly_pubsub::subscriber::Subscriber;
 
@@ -34,6 +34,7 @@ impl ImuStream {
 fn session(
     device: &Path,
     sticks: &Subscriber<SticksMessage>,
+    status: &std::sync::mpsc::SyncSender<matrix_status::Snapshot>,
     mut publish: impl FnMut(ImuMessage) -> io::Result<()>,
 ) -> io::Result<()> {
     let mut port = OpenOptions::new().read(true).write(true).open(device)?;
@@ -46,7 +47,7 @@ fn session(
     port.write_all(matrix::ENTER)?;
     let start = Instant::now();
     let mut scratch = [0; 2048];
-    let mut buffer = Vec::with_capacity(scratch.len() + 20);
+    let mut buffer = Vec::with_capacity(scratch.len() + matrix::STATUS_BYTES);
     loop {
         let n = port.read(&mut scratch)?;
         buffer.extend_from_slice(&scratch[..n]);
@@ -65,6 +66,7 @@ fn session(
     }
     let mut clock = matrix::SampleClock::default();
     let mut samples = Vec::with_capacity(scratch.len() / 20 + 1);
+    let mut snapshots = Vec::with_capacity(scratch.len() / matrix::STATUS_BYTES + 1);
     let mut imu = ImuStream::Waiting {
         since: Instant::now(),
     };
@@ -96,7 +98,7 @@ fn session(
             }
             next_command = Instant::now() + Duration::from_millis(20);
         }
-        matrix::decode(&mut buffer, &mut samples);
+        matrix::decode(&mut buffer, &mut samples, &mut snapshots);
         if let Some(newest) = samples.last() {
             let tick = newest.tick;
             let arrival = monotonic_seconds()?;
@@ -107,6 +109,14 @@ fn session(
             imu = ImuStream::Receiving {
                 last_frame: Instant::now(),
             };
+        }
+        if !snapshots.is_empty() {
+            let arrival = monotonic_seconds()?;
+            for frame in snapshots.drain(..) {
+                let tick = u32::from_le_bytes([frame[2], frame[3], frame[4], frame[5]]);
+                let stamp = clock.status_time(tick, arrival);
+                let _ = status.try_send(matrix_status::Snapshot { stamp, frame });
+            }
         }
         if imu.stalled() {
             return Err(io::Error::new(
@@ -139,8 +149,17 @@ pub fn run(device: &Path) -> firefly_error::Result<()> {
         IMU_SUBSCRIPTION.service_max_buffer_size,
     )?;
     let notify = TopicNotifier::with_topic(&node, IMU_TOPIC)?;
+    let (status, receiver) = std::sync::mpsc::sync_channel(2);
+    let worker = thread::Builder::new()
+        .name("matrix-status".into())
+        .spawn(move || {
+            matrix_status::run(&receiver);
+        });
+    if let Err(error) = &worker {
+        log::warn!("Matrix telemetry worker unavailable: {error}");
+    }
     while RUNNING.load(Ordering::Relaxed) {
-        if let Err(error) = session(device, &sticks, |msg| {
+        if let Err(error) = session(device, &sticks, &status, |msg| {
             publisher.publish(msg).map_err(io::Error::other)?;
             notify.notify_sent_sample();
             Ok(())
@@ -148,6 +167,12 @@ pub fn run(device: &Path) -> firefly_error::Result<()> {
             log::warn!("{}: {error}", device.display());
             thread::sleep(Duration::from_millis(1250));
         }
+    }
+    drop(status);
+    if let Ok(handle) = worker
+        && handle.join().is_err()
+    {
+        log::warn!("Matrix telemetry worker panicked");
     }
     Ok(())
 }

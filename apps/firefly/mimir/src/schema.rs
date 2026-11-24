@@ -119,6 +119,23 @@ pub fn entity(bytes: &[u8], length: u32) -> Result<&str> {
 #[allow(clippy::too_many_lines)] // Keep the field registry in one table.
 pub fn fields(name: &str) -> Result<&'static [&'static str]> {
     let fields: &[&str] = match name {
+        "matrix/link" => &["slot", "fc_tick_us"],
+        "matrix/attitude" => &["roll_deg", "pitch_deg", "yaw_deg"],
+        "matrix/control/sticks" => &["roll_us", "pitch_us", "yaw_us", "throttle_us"],
+        "matrix/control/motors" => &["motor_1", "motor_2", "motor_3", "motor_4"],
+        "matrix/control/state" => &[
+            "armed",
+            "rx_signal",
+            "companion_applied",
+            "flight_mode_mask",
+        ],
+        "matrix/faults/state" => &["arming_disable_mask", "failsafe_phase"],
+        "matrix/faults/last_disarm" => &["reason", "fc_tick_us"],
+        "matrix/faults/last_failsafe" => &["entry_phase", "fc_tick_us"],
+        "matrix/power/state" => &["battery_state", "cells"],
+        "matrix/power/meter" => &["voltage_V", "current_A", "consumed_mAh"],
+        "matrix/power/extrema" => &["min_voltage_V", "peak_current_A"],
+        "matrix/temperature" => &["mcu_degC"],
         "hil/link" => &[
             "control_messages",
             "odometry_messages",

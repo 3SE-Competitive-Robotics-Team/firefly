@@ -46,22 +46,21 @@ def read_usb(path):
             if not chunk:
                 raise OSError("USB disconnected")
             data.extend(chunk)
-            while len(data) >= 20:
-                start = data.find(b"FI")
-                if start < 0:
-                    del data[:-1]
-                    break
-                del data[:start]
-                if len(data) < 20:
-                    break
-                if binascii.crc_hqx(data[:18], 0) != int.from_bytes(data[18:20], "little"):
+            while len(data) >= 2:
+                size = {b"FI": 20, b"FT": 68}.get(bytes(data[:2]))
+                if size is None:
                     del data[:1]
                     continue
-                if now >= report_at:
+                if len(data) < size:
+                    break
+                if binascii.crc_hqx(data[:size-2], 0) != int.from_bytes(data[size-2:size], "little"):
+                    del data[:1]
+                    continue
+                if size == 20 and now >= report_at:
                     us, ax, ay, az, gx, gy, gz = struct.unpack_from("<I6h", data, 2)
                     print(f"{us} us  acc(mg) {ax} {ay} {az}  gyro(0.1 deg/s) {gx} {gy} {gz}", flush=True)
                     report_at = now + 1
-                del data[:20]
+                del data[:size]
 
 
 if __name__ == "__main__":

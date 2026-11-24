@@ -335,6 +335,31 @@ publication and total timing. Posterior age also includes visual processing and 
 Default RootSLAM runs as VIO. Planner maintains occupancy and trajectories from raw body odometry
 and depth. Global map optimization is evaluated through the dataset observations.
 
+## Matrix flight diagnostics
+
+During a real Matrix USB session, pilot publishes twelve scalar groups per flight snapshot
+on `Firefly/VizScalars`. Mimir records them on the IMU measurement timeline (`sim_time`).
+Before the first IMU anchor, pilot uses USB arrival time. Start the onboard recorder
+before the flight with `systemctl start firefly-mimir.service`.
+
+| Entity under `matrix/` | Recorded fields |
+|---|---|
+| `link` | Slot since handshake and raw 32-bit FC capture time in µs. A skipped slot identifies missing coverage. |
+| `attitude` | Betaflight roll, pitch and yaw in degrees. |
+| `control/state`, `control/sticks`, `control/motors` | Armed, RX signal, companion applied, mode mask. Effective primary channels in µs and four MSP motor commands. |
+| `faults/state`, `faults/last_disarm`, `faults/last_failsafe` | Arming-disable mask and current failsafe phase. Latest disarm reason and failsafe entry phase, each paired with its latched FC time in µs. |
+| `power/state`, `power/meter`, `power/extrema` | Betaflight battery state, cell count, voltage (V), current (A), charge (mAh), minimum sampled ADC voltage and peak sampled ADC current since the previous transmitted snapshot. |
+| `temperature` | Cached MCU die temperature (°C), refreshed by Betaflight at 1 Hz. |
+
+The firmware sends one 68-byte snapshot per 100 ms slot (680 B/s nominal).
+It drains incoming commands first, reserves eight IMU frames of USB TX space and
+skips congested slots. ADC extrema survive these skipped slots. The USB thread in
+pilot offers whole snapshots to a two-slot queue with `try_send`. A separate thread
+publishes at most 120 scalar messages/s (15,360 B/s of IPC payload) at nominal rate.
+Sensor availability bits become NaN for unavailable measurements. Flight controller
+event times and capture times use the same wrapping µs counter. The slot resets
+on a new handshake. Mimir preserves the groups and gaps in each recorded run.
+
 ## Recorder architecture and operation
 
 Mimir prints the absolute run directory on stdout and writes numbered files under `rrd/`. The [Mimir recording contract](mimir.md) defines the layout, storage limits and retention rules for all callers.

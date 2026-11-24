@@ -4,6 +4,8 @@ use std::io;
 pub const ENTER: &[u8] = b"$X<\x00\x01\x3f\x00\x00\xab";
 pub const ACK: &[u8] = b"$X>\x00\x01\x3f\x00\x00\xab";
 pub const HEARTBEAT: &[u8] = b"FH\xa6\x6e";
+pub const STATUS_BYTES: usize = 68;
+pub type StatusFrame = [u8; STATUS_BYTES];
 
 /// CDC can still deliver queued IMU bytes when a session is reopened.
 pub fn ack_end(bytes: &[u8]) -> io::Result<Option<usize>> {
@@ -55,6 +57,13 @@ pub struct SampleClock {
 }
 
 impl SampleClock {
+    /// Project a diagnostic tick without changing the IMU clock anchor.
+    pub fn status_time(&self, tick: u32, arrival: f64) -> f64 {
+        self.anchor.map_or(arrival, |(previous, host)| {
+            host + f64::from(tick.cast_signed().wrapping_sub(previous.cast_signed())) * 1e-6
+        })
+    }
+
     pub fn align(&mut self, tick: u32, arrival: f64) -> io::Result<f64> {
         let stamp = if let Some((previous, host)) = self.anchor {
             let dt = tick.wrapping_sub(previous);
@@ -96,11 +105,27 @@ impl Sample {
     }
 }
 
-pub fn decode(buffer: &mut Vec<u8>, samples: &mut Vec<Sample>) {
+pub fn decode(buffer: &mut Vec<u8>, samples: &mut Vec<Sample>, status: &mut Vec<StatusFrame>) {
     let mut pos = 0;
-    while buffer.len() - pos >= 20 {
-        let frame = &buffer[pos..pos + 20];
-        if &frame[..2] == b"FI" && crc(&frame[..18]) == u16::from_le_bytes([frame[18], frame[19]]) {
+    while buffer.len() - pos >= 2 {
+        let size = match &buffer[pos..pos + 2] {
+            b"FI" => 20,
+            b"FT" => STATUS_BYTES,
+            _ => {
+                pos += 1;
+                continue;
+            }
+        };
+        let Some(frame) = buffer.get(pos..pos + size) else {
+            break;
+        };
+        if crc(&frame[..size - 2]) != u16::from_le_bytes([frame[size - 2], frame[size - 1]]) {
+            pos += 1;
+            continue;
+        }
+        if let Ok(snapshot) = frame.try_into() {
+            status.push(snapshot);
+        } else {
             let axes = std::array::from_fn(|axis| {
                 let i = 6 + 2 * axis;
                 i16::from_le_bytes([frame[i], frame[i + 1]])
@@ -109,10 +134,8 @@ pub fn decode(buffer: &mut Vec<u8>, samples: &mut Vec<Sample>) {
                 tick: u32::from_le_bytes([frame[2], frame[3], frame[4], frame[5]]),
                 axes,
             });
-            pos += 20;
-        } else {
-            pos += 1;
         }
+        pos += size;
     }
     buffer.drain(..pos);
 }
@@ -144,9 +167,10 @@ mod tests {
         let mut buffer = b"FIbad".to_vec();
         let mut samples = Vec::new();
         buffer.extend_from_slice(&frame[..16]);
-        decode(&mut buffer, &mut samples);
+        let mut status = Vec::new();
+        decode(&mut buffer, &mut samples, &mut status);
         buffer.extend_from_slice(&frame[16..]);
-        decode(&mut buffer, &mut samples);
+        decode(&mut buffer, &mut samples, &mut status);
         assert_eq!(buffer, [] as [u8; 0]);
         assert_eq!(samples.len(), 1);
         assert_eq!(samples[0].tick, 0x7856_3412);
@@ -159,7 +183,34 @@ mod tests {
     fn clock_spans_wrap_and_rejects_reboot() {
         let mut clock = SampleClock::default();
         clock.align(u32::MAX - 499, 4.).unwrap();
+        assert!((clock.status_time(500, 12.) - 4.001).abs() < 1e-9);
         assert!((clock.align(500, 4.001).unwrap() - 4.001).abs() < 1e-9);
         assert!(clock.align(0, 5.).is_err());
+    }
+
+    #[test]
+    fn recovers_mixed_frames_at_every_split_after_bad_status_crc() {
+        let mut imu = [0; 20];
+        imu[..2].copy_from_slice(b"FI");
+        let checksum = crc(&imu[..18]);
+        imu[18..].copy_from_slice(&checksum.to_le_bytes());
+        let mut status = [0; STATUS_BYTES];
+        status[..2].copy_from_slice(b"FT");
+        status[16..36].copy_from_slice(&imu);
+        let checksum = crc(&status[..STATUS_BYTES - 2]);
+        status[STATUS_BYTES - 2..].copy_from_slice(&checksum.to_le_bytes());
+        let mut bad = [0; STATUS_BYTES];
+        bad[..2].copy_from_slice(b"FT");
+        let bytes = [&bad[..], &imu, &status, &imu].concat();
+        for split in 0..=bytes.len() {
+            let mut buffer = bytes[..split].to_vec();
+            let (mut samples, mut snapshots) = (Vec::new(), Vec::new());
+            decode(&mut buffer, &mut samples, &mut snapshots);
+            buffer.extend_from_slice(&bytes[split..]);
+            decode(&mut buffer, &mut samples, &mut snapshots);
+            assert_eq!(buffer, [] as [u8; 0]);
+            assert_eq!(samples.len(), 2);
+            assert_eq!(snapshots, [status]);
+        }
     }
 }
