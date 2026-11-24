@@ -66,6 +66,47 @@ impl CollisionSnapshot {
         self.words[address / 64] & (1 << (address % 64)) != 0
     }
 
+    /// Visit set bits inside the intersection with a half-open global box.
+    pub(crate) fn visit_occupied(
+        &self,
+        low: [i64; 3],
+        end: [i64; 3],
+        mut visit: impl FnMut([i64; 3]),
+    ) {
+        let clip = |at: [i64; 3]| -> [usize; 3] {
+            std::array::from_fn(|i| {
+                at[i]
+                    .saturating_sub(self.low[i])
+                    .clamp(0, self.dims[i] as i64) as usize
+            })
+        };
+        let low = clip(low);
+        let end = clip(end);
+        if (0..3).any(|i| low[i] >= end[i]) {
+            return;
+        }
+        for z in low[2]..end[2] {
+            for y in low[1]..end[1] {
+                let row = (z * self.dims[1] + y) * self.dims[0];
+                let mut x = low[0];
+                while x < end[0] {
+                    let at = row + x;
+                    let count = (64 - at % 64).min(end[0] - x);
+                    let mut bits = (self.words[at / 64] >> (at % 64)) & (u64::MAX >> (64 - count));
+                    while bits != 0 {
+                        visit([
+                            self.low[0] + x as i64 + i64::from(bits.trailing_zeros()),
+                            self.low[1] + y as i64,
+                            self.low[2] + z as i64,
+                        ]);
+                        bits &= bits - 1;
+                    }
+                    x += count;
+                }
+            }
+        }
+    }
+
     pub(crate) fn shares_data(&self, other: &Self) -> bool {
         self.low == other.low && self.dims == other.dims && Arc::ptr_eq(&self.words, &other.words)
     }

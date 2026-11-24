@@ -612,6 +612,9 @@ impl GridMap {
     /// Visit x-contiguous inflated runs within the occupancy window. Integer bounds are
     /// half-open; callers can preserve the exact lattice without serializing every voxel.
     /// Virtual walls remain a query-time constraint and are not included here.
+    ///
+    /// # Panics
+    /// Panics if an internal row offset exceeds the grid's signed 32-bit width.
     pub fn inflated_runs(&self) -> impl Iterator<Item = ([i32; 3], [i32; 3])> + '_ {
         let low = self.low;
         let high = self.high;
@@ -623,22 +626,56 @@ impl GridMap {
                     let stride = self.inf_size.x as usize;
                     let offset = address % stride;
                     let row = &self.inflate[address - offset..][..stride];
-                    let counts = row[offset..]
-                        .iter()
-                        .chain(&row[..offset])
-                        .take(self.size.x as usize);
-                    let mut start = None;
-                    (low.x..=high.x + 1)
-                        .zip(counts.map(|count| *count > 0).chain(std::iter::once(false)))
-                        .filter_map(move |(x, occupied)| {
-                            if occupied {
-                                start.get_or_insert(x);
-                                None
-                            } else {
-                                start.take().map(|begin| ([begin, y, z], [x, y + 1, z + 1]))
-                            }
-                        })
+                    let width = self.size.x as usize;
+                    let (before, after) = row.split_at(offset);
+                    let first = &after[..width.min(after.len())];
+                    let second = &before[..width - first.len()];
+                    occupied_runs(first, second).map(move |(start, end)| {
+                        let x = |offset| low.x + i32::try_from(offset).expect("row width fits i32");
+                        ([x(start), y, z], [x(end), y + 1, z + 1])
+                    })
                 })
             })
+    }
+}
+
+/// The two slices form one logical row across the ring-buffer seam.
+fn occupied_runs<'a>(
+    first: &'a [u16],
+    second: &'a [u16],
+) -> impl Iterator<Item = (usize, usize)> + 'a {
+    let width = first.len() + second.len();
+    let mut cells = first.iter().chain(second).copied().enumerate();
+    std::iter::from_fn(move || {
+        let (start, _) = cells.find(|&(_, count)| count != 0)?;
+        let end = cells
+            .find(|&(_, count)| count == 0)
+            .map_or(width, |(i, _)| i);
+        Some((start, end))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn occupied_runs_preserve_every_boundary_across_the_ring_seam() {
+        for mask in 0..256_u32 {
+            let row: [u16; 8] = std::array::from_fn(|i| if mask & (1 << i) == 0 { 0 } else { 17 });
+            let expected: Vec<_> = (0..row.len())
+                .filter(|&i| row[i] != 0 && (i == 0 || row[i - 1] == 0))
+                .map(|start| {
+                    (
+                        start,
+                        start + row[start..].iter().take_while(|&&v| v != 0).count(),
+                    )
+                })
+                .collect();
+            for seam in 0..=row.len() {
+                let (first, second) = row.split_at(seam);
+                assert_eq!(occupied_runs(first, second).collect::<Vec<_>>(), expected);
+            }
+        }
     }
 }
