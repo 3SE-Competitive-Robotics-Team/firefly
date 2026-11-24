@@ -14,6 +14,16 @@ const DESTINATION: &str = "/opt/firefly";
 const PACKAGE: &str = "dist/firefly-aarch64.zst";
 const REMOTE_PACKAGE: &str = "/tmp/firefly-package.zst";
 const REMOTE_UNPACKER: &str = "/tmp/firefly-xtask";
+// Older installs launched the watchdog through taskset. Its pidfile can outlive its process.
+const RETIRE_USB_WATCHDOG: &str = r#"
+mkdir -p /opt/firefly/logs/hil && (
+    flock -x 9 || exit 1
+    if [ -f /etc/systemd/system/firefly-usb-watchdog.service ]; then
+        systemctl stop firefly-usb-watchdog.service || exit 1
+    fi
+    pkill -fx '/opt/firefly/bin/hil-gadget watchdog' || [ "$?" = 1 ] || exit 1
+    rm -f /opt/firefly/logs/hil/watchdog.pid /opt/firefly/logs/hil/restored
+) 9>>/opt/firefly/logs/hil/transition.lock"#;
 const BOARD_MODELS: &[&str] = &[
     "h-marker-yolo26n-cif-v1/viplite.json",
     "h-marker-yolo26n-cif-v1/h-marker.nb",
@@ -29,7 +39,7 @@ pub fn run(device: &str) -> Result<()> {
 /// 构建并部署机载 release，最后拉起 `firefly.service` 并确认 supervisor 就绪。
 pub(crate) fn deploy(device: &str) -> Result<()> {
     release::build(Target::Board)?;
-    let package = package()?;
+    let package = package(&target::workspace_root())?;
     push(device, &package)?;
     start(device)
 }
@@ -44,9 +54,8 @@ pub(crate) fn adb_output(device: &str, args: &[&str]) -> Result<String> {
     adb_output_inner(device, args)
 }
 
-fn package() -> Result<PathBuf> {
-    let root = target::workspace_root();
-    let release_dir = Target::Board.release_dir(&root);
+fn package(root: &Path) -> Result<PathBuf> {
+    let release_dir = Target::Board.release_dir(root);
     let mut entries = Vec::new();
 
     for app in Target::Board.apps() {
@@ -95,6 +104,7 @@ fn package() -> Result<PathBuf> {
     for name in [
         "firefly-daemon.service",
         "firefly-mimir.service",
+        "firefly-usb-watchdog.service",
         "firefly.service.d/cpu-affinity.conf",
     ] {
         entries.push(Entry {
@@ -157,6 +167,7 @@ fn push(device: &str, package: &Path) -> Result<()> {
 }
 
 fn prepare_destination_with(mut output: impl FnMut(&[&str]) -> Result<String>) -> Result<()> {
+    remote_step_with(RETIRE_USB_WATCHDOG, &mut output)?;
     remote_step_with("systemctl stop firefly", &mut output)?;
     remote_step_with(
         &format!("rm -rf {DESTINATION}/bin {DESTINATION}/configs {DESTINATION}/models"),
@@ -234,9 +245,12 @@ fn start(device: &str) -> Result<()> {
             "install -Dm 644 /opt/firefly/configs/firefly.service.d/cpu-affinity.conf ",
             "/etc/systemd/system/firefly.service.d/cpu-affinity.conf && ",
             "install -m 644 /opt/firefly/configs/firefly-daemon.service ",
+            "/opt/firefly/configs/firefly-usb-watchdog.service ",
             "/opt/firefly/configs/firefly-mimir.service /etc/systemd/system/ && ",
             "systemctl daemon-reload && systemctl disable --now firefly-mimir.service && ",
-            "systemctl enable firefly-daemon.service"
+            "systemctl enable firefly-daemon.service && ",
+            "systemctl enable --now firefly-usb-watchdog.service && ",
+            "systemctl is-active --quiet firefly-usb-watchdog.service"
         ),
     )?;
     remote_step(device, "systemctl start firefly")?;
@@ -331,19 +345,56 @@ fn adb(device: &str, args: &[&str]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{has_marker, prepare_destination_with, remote_step_with, unpack_with};
+    use super::*;
+
+    #[test]
+    fn board_package_ships_the_watchdog_and_its_service() {
+        let workspace = target::workspace_root();
+        let target = workspace.join("target");
+        fs::create_dir_all(&target).unwrap();
+        let scratch = tempfile::tempdir_in(target).unwrap();
+        let root = scratch.path();
+        std::os::unix::fs::symlink(workspace.join("configs"), root.join("configs")).unwrap();
+        let release = Target::Board.release_dir(root);
+        fs::create_dir_all(&release).unwrap();
+        for app in Target::Board.apps() {
+            fs::write(release.join(app), app).unwrap();
+        }
+        for name in BOARD_MODELS {
+            let model = root.join("models").join(name);
+            fs::create_dir_all(model.parent().unwrap()).unwrap();
+            fs::write(model, name).unwrap();
+        }
+        let installed = root.join("installed");
+        archive::unpack(&package(root).unwrap(), &installed).unwrap();
+        assert!(installed.join("bin/hil-gadget").is_file());
+        let unit = "configs/firefly-usb-watchdog.service";
+        assert_eq!(
+            fs::read(installed.join(unit)).unwrap(),
+            fs::read(workspace.join(unit)).unwrap()
+        );
+    }
 
     #[test]
     fn failed_stop_returns_before_sending_cleanup_command() {
-        let mut commands = Vec::new();
-        let result = prepare_destination_with(|args| {
-            commands.push(args[1].to_owned());
-            Ok("Failed to stop firefly.service".into())
-        });
-        assert!(result.is_err());
-        assert_eq!(commands.len(), 1);
-        assert!(commands[0].contains("systemctl stop firefly"));
-        assert!(!commands[0].contains("rm -rf"));
+        for failed_step in 0..2 {
+            let mut commands = Vec::new();
+            let result = prepare_destination_with(|args| {
+                commands.push(args[1].to_owned());
+                if commands.len() == failed_step + 1 {
+                    Ok("Failed to stop service".into())
+                } else {
+                    Ok("FIREFLY_STEP_COMPLETE".into())
+                }
+            });
+            assert!(result.is_err());
+            assert_eq!(commands.len(), failed_step + 1);
+            assert!(commands[0].contains("flock -x"));
+            assert!(commands.iter().all(|command| !command.contains("rm -rf")));
+            if failed_step == 1 {
+                assert!(commands[1].contains("(systemctl stop firefly)"));
+            }
+        }
     }
 
     #[test]

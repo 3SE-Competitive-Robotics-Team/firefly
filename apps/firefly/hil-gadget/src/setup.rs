@@ -7,7 +7,8 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use firefly_hil::gadget::{HIL, write_descriptors};
+use crate::watchdog::{BIND_TIMEOUT, HilTimer, Watchdog, bind, controller_name};
+use firefly_hil::gadget::{HIL, HOST_SEEN, write_descriptors};
 
 const GADGET: &str = "/sys/kernel/config/usb_gadget/g1";
 const FFS_ROOT: &str = "/dev/usb-ffs";
@@ -15,34 +16,28 @@ const STATE_DIR: &str = "/opt/firefly/logs/hil";
 const JOURNAL_TAG: &str = "firefly-hil-gadget";
 const READY: &str = "/opt/firefly/logs/hil/descriptors_ready";
 const UP_MARKER: &str = "/opt/firefly/logs/hil/up";
-/// adb 恢复成功标记（看门狗据此避免重复重建）。
-const RESTORE_MARKER: &str = "/opt/firefly/logs/hil/restored";
+// /run scopes interrupted transitions to the current boot.
+const PENDING: &str = "/run/firefly-hil-transition";
+const CONTROLLERS: &str = "/sys/class/udc";
+const WATCHDOG_SERVICE: &str = "firefly-usb-watchdog.service";
 const SERVE_PID: &str = "/opt/firefly/logs/hil/serve.pid";
-const WATCHDOG_PID: &str = "/opt/firefly/logs/hil/watchdog.pid";
 const ADBD: &str = "/usr/bin/adbd";
 const START_STOP_DAEMON: &str = "/usr/sbin/start-stop-daemon";
 const ADB: &str = "adb";
 const ADBD_DESCRIPTOR_WAIT: Duration = Duration::from_secs(1);
 /// 等待 `serve` 写描述符的上限。
 const READY_TIMEOUT: Duration = Duration::from_secs(5);
-/// 等待 UDC 解绑/绑定回读的上限。
-const BIND_TIMEOUT: Duration = Duration::from_secs(3);
-/// 看门狗等待 `up` 完成绑定的上限；超时即重建 adb-only gadget。
-const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(60);
 const PROCESSES: &str = "/opt/firefly/configs/processes.toml";
 const PROCESSES_DIR: &str = "/opt/firefly/configs";
 const PROCESSES_HIL: &str = "processes-hil.toml";
 /// 切换前的进程清单备份，恢复时原样写回。
 const PROCESSES_BACKUP: &str = "/opt/firefly/configs/processes-normal.toml";
-/// 主机心跳文件：板端 HIL 应用收到任意上行数据后刷新。
-const HOST_SEEN: &str = "/opt/firefly/logs/hil/host_seen";
-/// 主机无数据超过该时长即恢复 adb，避免 HIL 失败后失去远程访问。
-const HOST_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
-
 const FUNCTIONS: [&str; 2] = [ADB, HIL.name];
 
 pub fn up() -> Result<()> {
+    ensure_watchdog()?;
     let _transition = crate::transition::lock(Path::new(STATE_DIR))?;
+    begin_transition()?;
     note("开始：停止 firefly 与 adbd，整块重建 gadget");
     if let Err(error) = up_inner() {
         note(&format!("up 失败：{error}"));
@@ -58,10 +53,8 @@ pub fn up() -> Result<()> {
 fn up_inner() -> Result<()> {
     remove_file(READY)?;
     remove_file(UP_MARKER)?;
-    remove_file(RESTORE_MARKER)?;
+    remove_file(HOST_SEEN)?;
     stop_firefly();
-    start_watchdog()?;
-    stop_adb_rebind_loop();
     kill_serve();
     kill_adbd();
     set_device_role();
@@ -70,6 +63,7 @@ fn up_inner() -> Result<()> {
     start_firefly();
     fs::write(UP_MARKER, format!("{}\n", now_seconds()))
         .at_path("write HIL marker", Path::new(UP_MARKER))?;
+    remove_file(PENDING)?;
     sync_disk();
     note("HIL gadget 已绑定：单个 hil 功能（OUT + IN）");
     println!("HIL gadget 已绑定：单个 hil 功能（OUT + IN）");
@@ -91,10 +85,11 @@ pub fn serve() -> Result<()> {
 }
 
 pub fn diag() -> Result<()> {
+    ensure_watchdog()?;
     let _transition = crate::transition::lock(Path::new(STATE_DIR))?;
+    begin_transition()?;
     note("diag：单个 hil 功能");
     stop_firefly();
-    stop_adb_rebind_loop();
     kill_serve();
     kill_adbd();
     let result = diag_inner(&[&HIL]);
@@ -158,59 +153,45 @@ fn describe_dir(path: &Path) -> String {
 }
 
 pub fn down() -> Result<()> {
+    ensure_watchdog()?;
     let _transition = crate::transition::lock(Path::new(STATE_DIR))?;
     note("down：停止 firefly，恢复 adb-only gadget");
-    stop_firefly();
-    kill_serve();
     restore_adb_inner()?;
-    remove_file(UP_MARKER)?;
     println!("HIL gadget 已移除，adb gadget 已恢复");
     Ok(())
 }
 
-pub fn watchdog() -> Result<()> {
-    thread::sleep(WATCHDOG_TIMEOUT);
-    loop {
-        match watchdog_state(
-            Path::new(UP_MARKER).is_file(),
-            Path::new(RESTORE_MARKER).is_file(),
-        ) {
-            WatchdogState::Restored => return Ok(()),
-            WatchdogState::BindingIncomplete => {
-                note("watchdog：未完成绑定，重建 adb-only gadget");
-                return restore_adb();
-            }
-            WatchdogState::Active => {}
-        }
-        let idle = fs::metadata(HOST_SEEN)
-            .and_then(|meta| meta.modified())
-            .ok()
-            .and_then(|modified| modified.elapsed().ok())
-            .unwrap_or(Duration::MAX);
-        if idle > HOST_IDLE_TIMEOUT {
-            note(&format!(
-                "watchdog：主机 {idle:?} 无数据，重建 adb-only gadget"
-            ));
-            return restore_adb();
-        }
-        thread::sleep(Duration::from_secs(5));
+fn ensure_watchdog() -> Result<()> {
+    let status = Command::new("systemctl")
+        .args(["start", WATCHDOG_SERVICE])
+        .status()?;
+    if !status.success() {
+        return Err(Error::new(
+            ErrorKind::Unavailable,
+            format!("启动 {WATCHDOG_SERVICE} 失败：{status}"),
+        ));
     }
+    Ok(())
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum WatchdogState {
-    Restored,
-    BindingIncomplete,
-    Active,
-}
-
-fn watchdog_state(up: bool, restored: bool) -> WatchdogState {
-    if restored {
-        WatchdogState::Restored
-    } else if !up {
-        WatchdogState::BindingIncomplete
-    } else {
-        WatchdogState::Active
+pub fn watchdog() -> Result<()> {
+    let state = Path::new(STATE_DIR);
+    let _instance = crate::transition::try_lock(state, "watchdog.lock")?
+        .ok_or_else(|| Error::new(ErrorKind::Unavailable, "USB 看门狗已运行"))?;
+    let watchdog = Watchdog {
+        gadget: Path::new(GADGET),
+        controllers: Path::new(CONTROLLERS),
+        adb_endpoints: &Path::new(FFS_ROOT).join(ADB),
+        state,
+        pending: Path::new(PENDING),
+    };
+    let mut timer = HilTimer::default();
+    loop {
+        watchdog.poll(&mut timer, Instant::now(), || {
+            note("watchdog：HIL 切换或主机心跳已停滞 60 秒，恢复 ADB");
+            restore_adb_inner()
+        })?;
+        thread::sleep(Duration::from_secs(5));
     }
 }
 
@@ -350,32 +331,9 @@ fn ensure_gadget() -> Result<()> {
 }
 
 fn bind_udc() -> Result<()> {
-    let udc = udc_name()?;
-    let path = Path::new(GADGET).join("UDC");
-    fs::write(&path, format!("{udc}\n")).map_err(|error| {
-        Error::from(error)
-            .with_operation("bind UDC")
-            .with_context("udc", &udc)
-            .with_context("kernel", kernel_gadget_log())
-    })?;
-    if wait_udc_value(&path, &udc, BIND_TIMEOUT) {
-        return Ok(());
-    }
-    Err(Error::new(
-        ErrorKind::Timeout,
-        format!("UDC {udc} 绑定后未生效；内核日志：{}", kernel_gadget_log()),
-    ))
-}
-
-fn wait_udc_value(path: &Path, expected: &str, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if read_trimmed(path).as_deref() == Some(expected) {
-            return true;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
-    false
+    let name = controller_name(Path::new(CONTROLLERS))?;
+    bind(&Path::new(GADGET).join("UDC"), &name)
+        .map_err(|error| error.with_context("kernel", kernel_gadget_log()))
 }
 
 fn wait_udc_empty(path: &Path, timeout: Duration) -> bool {
@@ -387,23 +345,6 @@ fn wait_udc_empty(path: &Path, timeout: Duration) -> bool {
         thread::sleep(Duration::from_millis(20));
     }
     false
-}
-
-fn udc_name() -> Result<String> {
-    let dir = fs::read_dir("/sys/class/udc")
-        .map_err(|error| Error::from(error).with_operation("read /sys/class/udc"))?;
-    let mut names: Vec<String> = dir
-        .filter_map(std::result::Result::ok)
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
-    let [name] = names.as_slice() else {
-        return Err(Error::new(
-            ErrorKind::Unavailable,
-            format!("期望唯一 UDC，实际 {names:?}"),
-        ));
-    };
-    Ok(name.clone())
 }
 
 fn adb_serial() -> String {
@@ -460,13 +401,13 @@ fn link_function(name: &str) -> Result<()> {
     std::os::unix::fs::symlink(&target, &link).at_path("link", &link)
 }
 
-fn restore_adb() -> Result<()> {
-    let _transition = crate::transition::lock(Path::new(STATE_DIR))?;
-    restore_adb_inner()
+fn begin_transition() -> Result<()> {
+    fs::write(PENDING, "").at_path("mark USB transition", Path::new(PENDING))
 }
 
 /// Caller holds the transition lock through service startup and the final marker.
 fn restore_adb_inner() -> Result<()> {
+    begin_transition()?;
     note("restore：停止 HIL 进程，重建 adb-only gadget");
     stop_firefly();
     kill_serve();
@@ -476,49 +417,30 @@ fn restore_adb_inner() -> Result<()> {
     rebuild(false)?;
     start_firefly();
     note("adb gadget 已恢复");
-    fs::write(RESTORE_MARKER, format!("{}\n", now_seconds())).ok();
+    remove_file(UP_MARKER)?;
+    remove_file(PENDING)?;
     sync_disk();
     Ok(())
 }
 
 fn start_serve() -> Result<()> {
-    start_daemon("serve", SERVE_PID)
-}
-
-fn start_watchdog() -> Result<()> {
-    start_daemon("watchdog", WATCHDOG_PID)
-}
-
-fn start_daemon(command: &str, pidfile: &str) -> Result<()> {
     let exe = std::env::current_exe()
         .map_err(|error| Error::from(error).with_operation("current_exe"))?;
-    let _ = Command::new(START_STOP_DAEMON)
-        .args([
-            "--stop",
-            "--pidfile",
-            pidfile,
-            "--retry",
-            "TERM/2/KILL/1",
-            "--oknodo",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    kill_serve();
     let status = Command::new(START_STOP_DAEMON)
         .args([
             "--start",
             "--background",
             "--make-pidfile",
             "--pidfile",
-            pidfile,
+            SERVE_PID,
             "--startas",
             "/usr/bin/taskset",
             "--",
             "-c",
             "0",
             &exe.to_string_lossy(),
-            command,
+            "serve",
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -527,13 +449,13 @@ fn start_daemon(command: &str, pidfile: &str) -> Result<()> {
         .map_err(|error| {
             Error::from(error)
                 .with_operation("spawn")
-                .with_context("command", command)
+                .with_context("command", "serve")
         })?;
     if !status.success() {
         return Err(Error::new(
             ErrorKind::Unavailable,
             format!(
-                "start-stop-daemon 启动 {command} 退出 {}",
+                "start-stop-daemon 启动 serve 退出 {}",
                 status.code().unwrap_or(-1)
             ),
         ));
@@ -595,17 +517,6 @@ fn open_ep0(name: &str) -> Result<fs::File> {
         .write(true)
         .open(&path)
         .at_path("open", &path)
-}
-
-fn stop_adb_rebind_loop() {
-    let _ = fs::write("/etc/.disable_udc", "");
-    thread::sleep(Duration::from_millis(2500));
-    let _ = Command::new("pkill")
-        .args(["-x", "adb_conf.sh"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    thread::sleep(Duration::from_millis(500));
 }
 
 /// 切换到完整 HIL 进程清单；源文件必须由部署提供。
@@ -713,10 +624,9 @@ fn kill_serve() {
     else {
         return;
     };
-    let comm = fs::read_to_string(format!("/proc/{pid}/comm"))
-        .ok()
-        .map(|text| text.trim().to_owned());
-    if comm.as_deref() != Some("hil-gadget") {
+    if !fs::read(format!("/proc/{pid}/cmdline"))
+        .is_ok_and(|args| args.ends_with(b"/hil-gadget\0serve\0"))
+    {
         remove_file(SERVE_PID).ok();
         return;
     }
@@ -878,17 +788,6 @@ fn now_seconds() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn watchdog_exits_after_manual_or_failed_start_restoration() {
-        assert_eq!(watchdog_state(false, true), WatchdogState::Restored);
-        assert_eq!(watchdog_state(true, true), WatchdogState::Restored);
-        assert_eq!(
-            watchdog_state(false, false),
-            WatchdogState::BindingIncomplete
-        );
-        assert_eq!(watchdog_state(true, false), WatchdogState::Active);
-    }
 
     #[test]
     fn next_hil_session_restores_latest_normal_manifest() {

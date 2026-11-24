@@ -45,6 +45,10 @@ Ground truth, local odometry and map odometry retain their original frames. Offl
 
 RootSLAM logs its accepted IMU count on shutdown. With `vio-receive=debug` it also reports the counter every 8192 samples.
 
+The board USB watchdog logs a confirmed ADB rebind or a HIL timeout to the journal under
+`firefly-hil-gadget`. Idle polls are silent. The supervisor archives these events with the
+current boot's system stream under the existing segment and rotation limits. [Run archive](mimir.md)
+
 ## IPC topic catalog
 
 Rust layouts and capacities live in [firefly-pubsub](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/crates/firefly-pubsub/src/lib.rs).
