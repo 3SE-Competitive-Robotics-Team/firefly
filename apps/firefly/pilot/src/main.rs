@@ -3,6 +3,7 @@ mod config;
 mod frames;
 mod imu;
 mod matrix;
+mod matrix_status;
 mod usb;
 
 use std::path::PathBuf;

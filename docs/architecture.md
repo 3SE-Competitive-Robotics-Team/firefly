@@ -8,7 +8,7 @@
 | Mac 软件在环（SIL） | MuJoCo 生成 IMU 和机体状态，`render` 生成双目和下视图像。 | `pilot --simulation` 将任务参考转换成杆量。Mac `fc` 用杆量和仿真 IMU 计算四电机推力，MuJoCo 推进动力学。 |
 | USB 硬件在环（HIL） | Mac 生成测量，通过 USB 桥发送给 Orange Pi 的 `camera --hil`。 | 任务、感知、规划和仿真 pilot 在 Orange Pi 运行。`motor --hil` 回传杆量，Mac `fc` 解算推力。宿主机 Mimir 同时录制板端遥测与仿真真值。 |
 
-实机已在台架上验证 Matrix → pilot → RootSLAM 的 IMU 链路。固件当前回传 IMU，daemon 仍需机体参数和飞控状态才能受理飞行任务。SIL 和 HIL 提供这两项反馈。[台架结果](hw/spec.md#飞控电调板) · [板端进程](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/configs/processes.toml) · [HIL 进程](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/configs/processes-hil.toml)
+实机已在台架上验证 Matrix → pilot → RootSLAM 的 IMU 链路。固件还以 5 Hz 回传飞控诊断快照，pilot 通过 `Firefly/VizScalars` 发布给 Mimir。daemon 受理实机任务所需的机体参数与任务状态反馈仍待接入。SIL 和 HIL 提供这两项反馈。[台架结果](hw/spec.md#飞控电调板) · [板端进程](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/configs/processes.toml) · [HIL 进程](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/configs/processes-hil.toml)
 
 ## Matrix USB 会话
 
@@ -17,7 +17,7 @@ Orange Pi 的 `pilot` 独占 Matrix 的 USB 数据口。MSPv2 用于请求切换
 ```mermaid
 stateDiagram-v2
     state "Betaflight 配置模式" as Config
-    state "Firefly 收发 IMU 和杆量" as Firefly
+    state "Firefly 收发 IMU、诊断和杆量" as Firefly
     [*] --> Config
     Config --> Firefly : 飞控已上锁，pilot 请求切换并收到 ACK
     Firefly --> Config : 上行静默一秒
@@ -26,7 +26,7 @@ stateDiagram-v2
 
 pilot 将飞控时间戳映射到 Orange Pi 单调时钟，加速度以 m/s²、角速度以 rad/s 发布。实机杆量发布者按横滚、俯仰、偏航、油门填写四个通道，`state_time` 使用 Orange Pi 单调时钟的秒数。
 
-单独读取 IMU 时，pilot 每 250 ms 发送一次心跳。杆量有独立的 100 ms 超时，只有新的有效控制帧能续期。实体遥控器负责解锁并授权接管。ANGLE 模式下，横滚和俯仰给定倾角，偏航给定转速，油门给定推力。[帧格式和控制条件](https://github.com/3SE-Competitive-Robotics-Team/betaflight/blob/8f5dbb8a737780d39716e7542b21788836e9e2f0/docs/firefly_serial_protocol.md#usb-connection)
+单独读取 IMU 时，pilot 每 250 ms 发送一次心跳。杆量有独立的 100 ms 超时，只有新的有效控制帧能续期。实体遥控器负责解锁并授权接管。ANGLE 模式下，横滚和俯仰给定倾角，偏航给定转速，油门给定推力。[帧格式和控制条件](https://github.com/3SE-Competitive-Robotics-Team/betaflight/blob/46710e33d2ae8eb3ee45f19f94c4ebf1f08a179f/docs/firefly_serial_protocol.md#usb-connection)
 
 ## 机载数据流
 

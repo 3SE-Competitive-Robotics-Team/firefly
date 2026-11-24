@@ -11,8 +11,10 @@ ROOT = Path(__file__).resolve().parents[2]
 @pytest.fixture(scope="session", autouse=True)
 def build_release_apps(request):
     """Build release apps when the system-test suite is explicitly selected."""
-    if all(item.path.name == "test_mimir.py" for item in request.session.items):
-        subprocess.run(["cargo", "build", "--release", "-p", "mimir"], cwd=ROOT, check=True)
+    suites = {item.path.name for item in request.session.items}
+    if suites <= {"test_mimir.py", "test_matrix_pilot.py"}:
+        packages = ["-p", "pilot"] if "test_matrix_pilot.py" in suites else []
+        subprocess.run(["cargo", "build", "--release", "-p", "mimir", *packages], cwd=ROOT, check=True)
         return
 
     subprocess.run(

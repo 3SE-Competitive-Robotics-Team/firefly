@@ -10,6 +10,12 @@ extern "C" {
 #include "io/firefly_serial_protocol.h"
 #include "io/serial.h"
 #include "drivers/system.h"
+#include "common/crc.h"
+#include "flight/failsafe.h"
+#include "flight/imu.h"
+#include "flight/mixer.h"
+#include "rx/rx.h"
+#include "sensors/battery.h"
 #include "fc/runtime_config.h"
 #include "msp/msp_serial.h"
 #include "pg/msp.h"
@@ -19,6 +25,23 @@ extern "C" {
 acc_t acc;
 gyro_t gyro;
 uint8_t armingFlags;
+uint16_t flightModeFlags;
+attitudeEulerAngles_t attitude;
+float motor[MAX_SUPPORTED_MOTORS];
+float rcData[MAX_SUPPORTED_RC_CHANNEL_COUNT];
+uint8_t getMotorCount(void) { return 4; }
+uint16_t motorConvertToExternal(float value) { return (uint16_t)value; }
+bool isRxReceivingSignal(void) { return true; }
+armingDisableFlags_e getArmingDisableFlags(void) { return ARMING_DISABLED_RX_FAILSAFE; }
+failsafePhase_e failsafePhase(void) { return FAILSAFE_IDLE; }
+batteryState_e getBatteryState(void) { return BATTERY_WARNING; }
+uint8_t getBatteryCellCount(void) { return 1; }
+bool isBatteryVoltageConfigured(void) { return true; }
+bool isAmperageConfigured(void) { return true; }
+uint16_t getBatteryVoltageLatest(void) { return 381; }
+int32_t getAmperageLatest(void) { return -12; }
+int32_t getMAhDrawn(void) { return 43; }
+int16_t getCoreTemperatureCelsius(void) { return 39; }
 serialConfig_t serialConfig_System;
 mspConfig_t mspConfig_System;
 const uint32_t baudRates[BAUD_COUNT] = {};
@@ -115,11 +138,11 @@ TEST(FireflySerial, SplitCommandsResyncExpiryAndWrap)
     const std::vector<uint8_t> valid = {0x46,0x43,0xd2,0x04,0xdc,0x05,0xf1,0x06,0xe8,0x03,0x9c,0x75};
     input = {0x46,0x43,0x99,0x46,0x46,0x43,0xd2};
     fireflySerialProcess(&usb, start + 10);
-    fireflySerialApplyControl(start + 10, radio.data());
+    fireflySerialApplyControl(start + 10, radio.data(), true);
     EXPECT_EQ(original, radio);
     input.insert(input.end(), valid.begin() + 3, valid.end());
     fireflySerialProcess(&usb, start + 20);
-    fireflySerialApplyControl(start + 2000, radio.data());
+    fireflySerialApplyControl(start + 2000, radio.data(), true);
     EXPECT_EQ((std::array<float,5>{1234,1500,1777,1000,1840}), radio);
 
     input.insert(input.end(), valid.begin(), valid.end());
@@ -128,13 +151,55 @@ TEST(FireflySerial, SplitCommandsResyncExpiryAndWrap)
     input.insert(input.end(), {0x46,0x43,0xd1,0x07,0xdc,0x05,0xf1,0x06,0xe8,0x03,0x6b,0x65});
     fireflySerialProcess(&usb, start + 4000);
     radio = original;
-    fireflySerialApplyControl(start + 100020, radio.data());
+    fireflySerialApplyControl(start + 100020, radio.data(), true);
     EXPECT_EQ(original, radio);
     // A scheduler stall discards commands already buffered by the host link.
     input.insert(input.end(), valid.begin(), valid.end());
     fireflySerialProcess(&usb, start + 105000);
-    fireflySerialApplyControl(start + 105001, radio.data());
+    fireflySerialApplyControl(start + 105001, radio.data(), true);
     EXPECT_EQ(original, radio);
+}
+
+TEST(FireflySerial, StatusYieldsToControlAndImuAndSkipsMissedSlots)
+{
+    const uint32_t start = UINT32_MAX - 20000;
+    fireflySerialStart(&usb, usbConnection, start);
+    output.clear();
+    input = {0x46,0x43,0xd2,0x04,0xdc,0x05,0xf1,0x06,0xe8,0x03,0x9c,0x75};
+    txSpace = 228;
+    fireflySerialProcess(&usb, start + 60000);
+    fireflySerialProcess(&usb, start + 150000);
+    EXPECT_TRUE(output.empty());
+    txSpace = 68 + 8 * 20 - 1;
+    input = {0x46,0x43,0xd2,0x04,0xdc,0x05,0xf1,0x06,0xe8,0x03,0x9c,0x75};
+    fireflySerialObserveCurrent(1200);
+    fireflySerialObserveVoltage(329);
+    fireflySerialProcess(&usb, start + 200000);
+    EXPECT_TRUE(output.empty());
+    fireflySerialApplyControl(start + 200000, rcData, true);
+    EXPECT_EQ(1234, rcData[0]);
+    fireflySerialSendImu(start + 200000);
+    EXPECT_EQ(20u, output.size());
+    output.clear();
+    txSpace = 228;
+    fireflySerialProcess(&usb, start + 399999);
+    EXPECT_TRUE(output.empty());
+    attitude.values.roll = -123;
+    fireflySerialRecordFailsafe(start + 41000, FAILSAFE_RX_LOSS_DETECTED);
+    fireflySerialRecordDisarm(start + 42000, 6);
+    fireflySerialProcess(&usb, start + 600000);
+    ASSERT_EQ(68u, output.size());
+    EXPECT_EQ('T', output[1]);
+    EXPECT_EQ(3, output[6]);
+    EXPECT_EQ(0x85, output[10]);
+    EXPECT_EQ(0xff, output[11]);
+    EXPECT_EQ(6, output[41]);
+    EXPECT_EQ(FAILSAFE_RX_LOSS_DETECTED, output[50]);
+    EXPECT_EQ(381, output[54] | output[55] << 8);
+    EXPECT_EQ(0xfff4, output[56] | output[57] << 8);
+    EXPECT_EQ(329, output[62] | output[63] << 8);
+    EXPECT_EQ(1200, output[64] | output[65] << 8);
+    EXPECT_EQ(crc16_ccitt_update(0, output.data(), 66), output[66] | output[67] << 8);
 }
 
 static const std::vector<uint8_t> enter = {'$', 'X', '<', 0, 1, 0x3f, 0, 0, 0xab};
@@ -223,7 +288,7 @@ TEST_F(FireflyUsb, OnlyValidUplinkRenewsSessionAndHeartbeatNeverRenewsControl)
     }
     std::array<float, 4> radio = {1500,1500,1500,1000};
     const auto original = radio;
-    fireflySerialApplyControl(now, radio.data());
+    fireflySerialApplyControl(now, radio.data(), true);
     EXPECT_EQ(original, radio);
     for (unsigned i = 0; i < 19; ++i) {
         now += 50000;
@@ -257,11 +322,11 @@ TEST_F(FireflyUsb, DisconnectRevokesControlBeforeNextSerialPoll)
     send({0x46,0x43,0xd2,0x04,0xdc,0x05,0xf1,0x06,0xe8,0x03,0x9c,0x75});
     std::array<float, 4> radio = {1500,1500,1500,1000};
     const auto original = radio;
-    fireflySerialApplyControl(now, radio.data());
+    fireflySerialApplyControl(now, radio.data(), true);
     EXPECT_NE(original, radio);
     usbConnection = 0;
     radio = original;
-    fireflySerialApplyControl(now, radio.data());
+    fireflySerialApplyControl(now, radio.data(), true);
     EXPECT_EQ(original, radio);
     poll();
     EXPECT_FALSE(fireflySerialOwnsPort(&usb));
