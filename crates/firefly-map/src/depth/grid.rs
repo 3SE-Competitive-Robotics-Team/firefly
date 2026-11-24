@@ -148,13 +148,20 @@ impl GridMap {
         source: &[T],
         convert: impl FnMut(T) -> u16,
     ) -> Result<DepthImage> {
-        DepthImage::sample(
-            width,
-            height,
-            source,
-            DepthSampling::for_map(&self.parameters),
-            convert,
-        )
+        DepthImage::sample(width, height, source, self.sampling(), Vec::new(), convert)
+    }
+
+    pub(super) fn sampling(&self) -> DepthSampling {
+        DepthSampling::for_map(&self.parameters)
+    }
+
+    pub(super) fn take_integrated_pixels(&mut self) -> Vec<u16> {
+        if self.depth_phase == DepthPhase::Integrated
+            && let Some(image) = self.depth.take()
+        {
+            return image.pixels;
+        }
+        Vec::new()
     }
 
     /// `depthPoseCallback`: pose is camera-to-world, and already paired with depth.

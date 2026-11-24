@@ -32,7 +32,7 @@ pub struct Pixels {
 }
 
 pub struct OutputGrid {
-    square: Vec<f32>,
+    expanded: Vec<[f32; IMAGE_WIDTH]>,
     head_axis: Vec<Rows>,
     output_rows: Vec<Rows>,
 }
@@ -55,7 +55,7 @@ impl Pixels {
                 })
                 .collect(),
             restore: OutputGrid {
-                square: vec![0.; SIDE * SIDE],
+                expanded: vec![[0.; IMAGE_WIDTH]; SIDE / 4],
                 head_axis: aligned(SIDE / 4, SIDE),
                 output_rows: aligned(SIDE, IMAGE_HEIGHT),
             },
@@ -83,40 +83,41 @@ impl Pixels {
 
 impl OutputGrid {
     /// Restore the compact NPU head to the ONNX output grid, then to camera pixels.
-    pub fn restore<'a>(
+    pub fn rows<'a>(
         &'a mut self,
         side: usize,
         values: &'a [f32],
-    ) -> (impl Iterator<Item = f32> + 'a, f32) {
-        let full = if side == SIDE {
-            values
-        } else {
-            for (row, &y) in self
-                .square
-                .as_chunks_mut::<SIDE>()
-                .0
-                .iter_mut()
-                .zip(&self.head_axis)
-            {
-                let a = &values[y.a * side..][..side];
-                let b = &values[y.b * side..][..side];
+    ) -> impl Fn(usize) -> [f32; IMAGE_WIDTH] + 'a {
+        if side != SIDE {
+            for (row, source) in self.expanded.iter_mut().zip(values.chunks_exact(side)) {
                 for (out, &x) in row.iter_mut().zip(&self.head_axis) {
-                    *out = y.sample(x.sample(a[x.a], a[x.b]), x.sample(b[x.a], b[x.b]));
+                    *out = x.sample(source[x.a], source[x.b]);
                 }
             }
-            &self.square
-        };
-        let center = self.output_rows[IMAGE_HEIGHT / 2];
-        let center_depth = center.sample(
-            full[center.a * SIDE + IMAGE_WIDTH / 2],
-            full[center.b * SIDE + IMAGE_WIDTH / 2],
-        );
-        let pixels = self.output_rows.iter().flat_map(move |&y| {
-            let a = &full[y.a * SIDE..][..IMAGE_WIDTH];
-            let b = &full[y.b * SIDE..][..IMAGE_WIDTH];
-            a.iter().zip(b).map(move |(&a, &b)| y.sample(a, b))
-        });
-        (pixels, center_depth)
+        }
+        let full = values.as_chunks::<IMAGE_WIDTH>().0;
+        let expanded = &self.expanded;
+        let axis = &self.head_axis;
+        let output_rows = &self.output_rows;
+        // Preserve the two vertical interpolation steps of the exported ONNX grid.
+        move |index| {
+            let y: Rows = output_rows[index];
+            if side == SIDE {
+                let (a, b) = (&full[y.a], &full[y.b]);
+                std::array::from_fn(|i| y.sample(a[i], b[i]))
+            } else {
+                let upper = axis[y.a];
+                let lower = axis[y.b];
+                let upper_rows = (&expanded[upper.a], &expanded[upper.b]);
+                let lower_rows = (&expanded[lower.a], &expanded[lower.b]);
+                std::array::from_fn(|x| {
+                    y.sample(
+                        upper.sample(upper_rows.0[x], upper_rows.1[x]),
+                        lower.sample(lower_rows.0[x], lower_rows.1[x]),
+                    )
+                })
+            }
+        }
     }
 }
 
@@ -131,18 +132,40 @@ mod tests {
             let plane: Vec<_> = (0..side * side)
                 .map(|i| 1. + (i / side + i % side) as f32 / (side - 1) as f32)
                 .collect();
-            let (pixels, center) = pixels.restore.restore(side, &plane);
-            let restored: Vec<_> = pixels.collect();
+            let row = pixels.restore.rows(side, &plane);
+            let restored: Vec<_> = (0..IMAGE_HEIGHT).flat_map(&row).collect();
             assert_eq!(restored.len(), IMAGE_WIDTH * IMAGE_HEIGHT);
-            assert_eq!(
-                center,
-                restored[IMAGE_WIDTH * (IMAGE_HEIGHT / 2) + IMAGE_WIDTH / 2]
-            );
             for (i, &v) in restored.iter().enumerate() {
                 let expected = 1.
                     + (i % IMAGE_WIDTH) as f32 / (IMAGE_WIDTH - 1) as f32
                     + (i / IMAGE_WIDTH) as f32 / (IMAGE_HEIGHT - 1) as f32;
                 assert!((v - expected).abs() < 1e-5);
+            }
+        }
+    }
+
+    #[test]
+    fn compact_head_matches_two_successive_resizes_bit_for_bit() {
+        let side = SIDE / 4;
+        let values: Vec<_> = (0..side * side)
+            .map(|i| ((i * 193 + i / 31) % 719) as f32 * 0.013)
+            .collect();
+        let coordinate = |i: usize, from: usize, to: usize| {
+            Rows::new((i * (from - 1)) as f32 / (to - 1) as f32, from)
+        };
+        let square_pixel = |x: usize, y: usize| {
+            let x = coordinate(x, side, SIDE);
+            let y = coordinate(y, side, SIDE);
+            let horizontal = |r| x.sample(values[r * side + x.a], values[r * side + x.b]);
+            y.sample(horizontal(y.a), horizontal(y.b))
+        };
+        let mut pixels = Pixels::new();
+        let row = pixels.restore.rows(side, &values);
+        for y in 0..IMAGE_HEIGHT {
+            let r = coordinate(y, SIDE, IMAGE_HEIGHT);
+            for (x, value) in row(y).into_iter().enumerate() {
+                let expected = r.sample(square_pixel(x, r.a), square_pixel(x, r.b));
+                assert_eq!(value.to_bits(), expected.to_bits());
             }
         }
     }

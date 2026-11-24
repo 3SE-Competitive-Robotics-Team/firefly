@@ -127,6 +127,7 @@ fn run_mapping(
     let _ = ready.send(Ok(()));
     let epoch = Instant::now();
     let mut next_occupancy = epoch + OCCUPANCY_PERIOD;
+    let mut occupancy_available = false;
     let mut next_fading = epoch + FADING_PERIOD;
     let mut last_stamp = None;
     let mut pending = VecDeque::new();
@@ -141,7 +142,7 @@ fn run_mapping(
                 last_stamp = Some(message.timestamp);
                 pending.push_back(DepthFrame::from_message(
                     &message,
-                    &fusion.map,
+                    &mut fusion.map,
                     fusion.options.k_depth_scaling_factor,
                     *message.user_header(),
                 )?);
@@ -154,7 +155,11 @@ fn run_mapping(
 
         let now = Instant::now();
         let mut timing = UpdateTiming::default();
-        if timer_due(&mut next_occupancy, OCCUPANCY_PERIOD, now)
+        let occupancy_tick = timer_due(&mut next_occupancy, OCCUPANCY_PERIOD, now);
+        // Each period admits its first available pair. An idle period leaves at most one slot.
+        occupancy_available |= occupancy_tick;
+        if occupancy_available
+            && (occupancy_tick || !pending.is_empty())
             && let Some(pair) = history
                 .read(|poses| take_pair(&mut pending, poses, now, fusion.options.max_pose_gap))?
         {
@@ -162,6 +167,7 @@ fn run_mapping(
             if let Some((frame, pose)) =
                 pair.and_then(|(frame, bracket)| Some((frame, bracket.pose()?)))
             {
+                occupancy_available = false;
                 let _span = frame.trace.continue_span("planner-depth-fusion");
                 let start = Instant::now();
                 let wait = start - frame.received;
@@ -170,7 +176,7 @@ fn run_mapping(
                     timing.integrate = start.elapsed();
                 }
             }
-            if fusion.map.timed_out_at(timer_time)? {
+            if occupancy_tick && fusion.map.timed_out_at(timer_time)? {
                 return Err(invalid("depth/pose fusion timed out; restart planner"));
             }
         }
@@ -308,7 +314,7 @@ struct DepthFrame {
 impl DepthFrame {
     fn from_message(
         message: &DepthImageMessage,
-        map: &DepthMapper,
+        map: &mut DepthMapper,
         scale: f64,
         trace: TraceContext,
     ) -> Result<Self> {
@@ -318,7 +324,7 @@ impl DepthFrame {
         {
             return Err(invalid("depth image does not match the calibrated rig"));
         }
-        let image = map.sample_depth(IMAGE_WIDTH, IMAGE_HEIGHT, &message.data, |metres| {
+        let image = map.sample_next_depth(IMAGE_WIDTH, IMAGE_HEIGHT, &message.data, |metres| {
             depth_units(metres, scale)
         })?;
         Ok(Self {

@@ -5,6 +5,8 @@ use nalgebra::Vector3;
 /// occupied and free votes, so only they need exact counts.
 pub(super) struct FrameRays {
     endpoint_slots: Vec<u32>,
+    /// A slot is valid only when the current frame contains that endpoint.
+    endpoint_mask: Vec<u64>,
     endpoints: Vec<Endpoint>,
     /// After traversal, the mapper narrows this mask to the cells receiving free evidence.
     pub(super) visited: Vec<u64>,
@@ -34,6 +36,7 @@ impl FrameRays {
         }
         Self {
             endpoint_slots: vec![0; capacity],
+            endpoint_mask: vec![0; capacity.div_ceil(64)],
             endpoints: Vec::new(),
             visited: vec![0; capacity.div_ceil(64)],
             probability_cells,
@@ -44,9 +47,8 @@ impl FrameRays {
     }
 
     pub(super) fn clear(&mut self) {
-        for endpoint in self.endpoints.drain(..) {
-            self.endpoint_slots[endpoint.address] = 0;
-        }
+        self.endpoints.clear();
+        self.endpoint_mask.fill(0);
         self.visited.fill(0);
         self.updates.clear();
         self.cell_count = 0;
@@ -85,16 +87,19 @@ impl FrameRays {
             self.require_update(address);
         }
         let slot = &mut self.endpoint_slots[address];
-        if *slot == 0 {
+        let bit = 1 << (address % 64);
+        let word = &mut self.endpoint_mask[address / 64];
+        if *word & bit == 0 {
+            *word |= bit;
+            *slot = u32::try_from(self.endpoints.len()).expect("map capacity fits i32");
             self.endpoints.push(Endpoint {
                 start,
                 address,
                 hits: 0,
                 misses: 0,
             });
-            *slot = u32::try_from(self.endpoints.len()).expect("map capacity fits i32");
         }
-        let end = &mut self.endpoints[*slot as usize - 1];
+        let end = &mut self.endpoints[*slot as usize];
         end.hits += usize::from(hit);
         end.misses += usize::from(!hit);
     }
@@ -115,9 +120,9 @@ impl FrameRays {
             }
             for cell in RayCaster::new(self.endpoints[i].start, camera_cell).skip(1) {
                 let a = address(cell);
-                let slot = self.endpoint_slots[a];
-                if slot != 0 {
-                    self.endpoints[slot as usize - 1].misses += 1;
+                if self.is_endpoint(a) {
+                    let slot = self.endpoint_slots[a];
+                    self.endpoints[slot as usize].misses += 1;
                 }
                 if !self.first_visit(a) {
                     break;
@@ -127,13 +132,16 @@ impl FrameRays {
     }
 
     pub(super) fn votes(&self, address: usize) -> (usize, usize) {
-        match self.endpoint_slots[address] {
-            0 => (0, 1),
-            slot => {
-                let end = &self.endpoints[slot as usize - 1];
-                (end.hits, end.misses)
-            }
+        if self.is_endpoint(address) {
+            let end = &self.endpoints[self.endpoint_slots[address] as usize];
+            (end.hits, end.misses)
+        } else {
+            (0, 1)
         }
+    }
+
+    fn is_endpoint(&self, address: usize) -> bool {
+        self.endpoint_mask[address / 64] & (1 << (address % 64)) != 0
     }
 }
 

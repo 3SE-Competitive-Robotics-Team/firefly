@@ -90,8 +90,15 @@ fn run_app() -> firefly_error::Result<()> {
         let (input, restore) = pixels.input(&frame.data);
         drop(sample);
         let center_depth = model.run(input, |side, values| {
-            let (pixels, center) = restore.restore(side, values);
-            output.publish_pixels(stamp, 0, pixels)?;
+            let row = restore.rows(side, values);
+            let mut center = 0.;
+            output.publish_rows(stamp, 0, |y| {
+                let pixels = row(y);
+                if y == IMAGE_HEIGHT / 2 {
+                    center = pixels[IMAGE_WIDTH / 2];
+                }
+                pixels
+            })?;
             Ok(center)
         })?;
         count += 1;

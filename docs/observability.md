@@ -182,7 +182,8 @@ The existing HIL scalar path forwards these observations without additional topi
 
 The **Map** tab in the lower panel reads these four numeric entities on the depth measurement
 `sim_time`. The mapping worker publishes them directly on `Firefly/VizScalars` with standard logging
-settings. The voxel display worker opens only the voxel port. At a 32 ms frame timer and 500 ms
+settings. The voxel display worker opens only the voxel port. Each 32 ms occupancy period admits
+one paired image on the first worker poll that finds it ready. Unused capacity expires at the next period. At this rate and a 500 ms
 maintenance timer the nominal upper bound is 127 scalar rows/s (16,256 payload bytes/s), with at
 most four rows per worker update. Counts use existing buffers and disjoint slab dimensions.
 Frame update time includes maintenance performed during the same worker iteration and ends before diagnostic IPC.

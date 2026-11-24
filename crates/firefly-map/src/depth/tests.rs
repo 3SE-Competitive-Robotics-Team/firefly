@@ -279,6 +279,22 @@ fn sampled_depth_matches_dense_projection_and_occupancy() {
 }
 
 #[test]
+fn next_depth_reuses_only_a_completed_image() {
+    let grid = crate::GridMapBuilder::new(1., [4; 3]).build().unwrap();
+    let mut mapper = super::DepthMapper::new(parameters(), Isometry3::identity(), &grid).unwrap();
+    let first = mapper.sample_next_depth(3, 3, &[1000; 9], |p| p).unwrap();
+    let ptr = first.pixels.as_ptr();
+    mapper
+        .integrate(first, Isometry3::identity(), 1., 1.)
+        .unwrap();
+    let second = mapper.sample_next_depth(3, 3, &[1250; 9], |p| p).unwrap();
+    assert_eq!(ptr, second.pixels.as_ptr());
+    let pending = mapper.sample_next_depth(3, 3, &[1500; 9], |p| p).unwrap();
+    assert!(second.pixels.iter().all(|p| *p == 1250));
+    assert_ne!(ptr, pending.pixels.as_ptr());
+}
+
+#[test]
 fn incompatible_depth_sampling_is_rejected_at_ingress() {
     let source = GridMap::new(parameters()).unwrap();
     let mut other = GridMap::new(MappingParameters {
