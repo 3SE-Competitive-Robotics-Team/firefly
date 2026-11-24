@@ -24,14 +24,19 @@ struct Endpoint {
 
 impl FrameRays {
     pub(super) fn new(capacity: usize, misses_saturate_at_free: bool) -> Self {
+        let mut probability_cells = vec![0; capacity.div_ceil(64)];
+        if !misses_saturate_at_free {
+            probability_cells.fill(u64::MAX);
+            if !capacity.is_multiple_of(64) {
+                *probability_cells.last_mut().expect("partial word exists") =
+                    (1 << (capacity % 64)) - 1;
+            }
+        }
         Self {
             endpoint_slots: vec![0; capacity],
             endpoints: Vec::new(),
             visited: vec![0; capacity.div_ceil(64)],
-            probability_cells: vec![
-                if misses_saturate_at_free { 0 } else { u64::MAX };
-                capacity.div_ceil(64)
-            ],
+            probability_cells,
             misses_saturate_at_free,
             updates: Vec::new(),
             cell_count: 0,
@@ -49,6 +54,10 @@ impl FrameRays {
 
     pub(super) fn require_update(&mut self, address: usize) {
         self.probability_cells[address / 64] |= 1 << (address % 64);
+    }
+
+    pub(super) fn probability_word(&self, word: usize) -> u64 {
+        self.probability_cells[word]
     }
 
     pub(super) fn saturated_free(&mut self, address: usize) {

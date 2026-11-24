@@ -399,7 +399,9 @@ impl GridMap {
                 self.rays.saturated_free(address);
             }
             let occupied = self.occupancy[address] >= self.min_occupancy_log;
-            if occupied || was_occupied {
+            if occupied != was_occupied
+                || (occupied && self.clamp_min_log == self.min_occupancy_log)
+            {
                 self.inflation_candidates.push(address);
             }
             if occupied || hit > 0 {
@@ -490,16 +492,29 @@ impl GridMap {
             0.
         };
         let low_threshold = self.clamp_min_log + reduce;
-        for address in 0..self.occupancy.len() {
-            if measured_at.is_some_and(|now| self.reset_expired_obstacle(address, now)) {
-                continue;
-            }
-            if reduce > 0. && self.occupancy[address] > low_threshold {
-                let was_occupied = self.occupancy[address] >= self.min_occupancy_log;
-                self.occupancy[address] -= reduce;
-                if was_occupied && self.occupancy[address] < self.min_occupancy_log {
-                    self.evidence.set(address, Evidence::Unknown);
-                    self.change_inf_buf(false, self.address_to_index(address));
+        for word in 0..self.occupancy.len().div_ceil(64) {
+            let mut cells = self.rays.probability_word(word);
+            while cells != 0 {
+                let address = word * 64 + cells.trailing_zeros() as usize;
+                cells &= cells - 1;
+                // Eviction can return a ring slot to its free clamp between maintenance ticks.
+                if self.occupancy[address] == self.clamp_min_log
+                    && self.clamp_min_log < self.min_occupancy_log
+                {
+                    self.rays.saturated_free(address);
+                    continue;
+                }
+                if measured_at.is_some_and(|now| self.reset_expired_obstacle(address, now)) {
+                    self.rays.saturated_free(address);
+                    continue;
+                }
+                if reduce > 0. && self.occupancy[address] > low_threshold {
+                    let was_occupied = self.occupancy[address] >= self.min_occupancy_log;
+                    self.occupancy[address] -= reduce;
+                    if was_occupied && self.occupancy[address] < self.min_occupancy_log {
+                        self.evidence.set(address, Evidence::Unknown);
+                        self.change_inf_buf(false, self.address_to_index(address));
+                    }
                 }
             }
         }
@@ -521,26 +536,68 @@ impl GridMap {
             self.inflate[center].wrapping_sub(OBSTACLE_FLAG)
         };
         self.set_inflation(center, count);
-        for x in -self.inf_grid..=self.inf_grid {
-            for y in -self.inf_grid..=self.inf_grid {
-                for z in -self.inf_grid..=self.inf_grid {
-                    let address = self.inf_address(id + Index::new(x, y, z));
-                    if add {
-                        self.set_inflation(address, self.inflate[address].wrapping_add(1));
-                    } else {
-                        self.set_inflation(address, self.inflate[address].wrapping_sub(1));
-                        // Upstream's unsigned underflow recovery, with the same reset scope.
-                        if self.inflate[address] > 65000 {
-                            self.occupancy.fill(self.clamp_min_log);
-                            self.evidence.clear();
-                            self.inflate.fill(0);
-                            self.collision_bits.fill(0);
-                            self.collision_revision = self.collision_revision.wrapping_add(1);
-                        }
-                    }
+        let size = self.inf_size.map(|v| v as usize);
+        let start = (id - Index::repeat(self.inf_grid))
+            .zip_map(&self.inf_size, i32::rem_euclid)
+            .map(|v| v as usize);
+        let width = (2 * self.inf_grid + 1) as usize;
+        let first = width.min(size.x - start.x);
+        let wrap = |v: usize, n: usize| if v >= n { v - n } else { v };
+        for z in start.z..start.z + width {
+            let plane = wrap(z, size.z) * size.y;
+            for y in start.y..start.y + width {
+                let row = (plane + wrap(y, size.y)) * size.x;
+                if !self.change_inf_row(row + start.x, first, add)
+                    || (first < width && !self.change_inf_row(row, width - first, add))
+                {
+                    // A removed neighbour had an invalid count. Upstream resets the map.
+                    self.occupancy.fill(self.clamp_min_log);
+                    self.evidence.clear();
+                    self.inflate.fill(0);
+                    self.collision_bits.fill(0);
+                    self.collision_revision = self.collision_revision.wrapping_add(1);
+                    return;
                 }
             }
         }
+    }
+
+    fn change_inf_row(&mut self, start: usize, len: usize, add: bool) -> bool {
+        let counts = &mut self.inflate[start..start + len];
+        let delta = if add { 1 } else { u16::MAX };
+        let boundary = u16::from(add);
+        let mut changed = 0_u64;
+        let mut offset = 0;
+        let tail = if let Some((lanes, rest)) = counts.split_first_chunk_mut::<8>() {
+            *lanes = lanes.map(|count| count.wrapping_add(delta));
+            if lanes.contains(&boundary) {
+                for (i, &count) in lanes.iter().enumerate() {
+                    changed |= u64::from(count == boundary) << i;
+                }
+            }
+            offset = 8;
+            rest
+        } else {
+            &mut *counts
+        };
+        for (i, count) in tail.iter_mut().enumerate() {
+            *count = count.wrapping_add(delta);
+            changed |= u64::from(*count == boundary) << (i + offset);
+        }
+        if !add && counts.iter().any(|&n| n > 65000) {
+            return false;
+        }
+        if changed != 0 {
+            let bit = start % 64;
+            self.collision_bits[start / 64] ^= changed << bit;
+            if bit + len > 64 {
+                self.collision_bits[start / 64 + 1] ^= changed >> (64 - bit);
+            }
+            self.collision_revision = self
+                .collision_revision
+                .wrapping_add(u64::from(changed.count_ones()));
+        }
+        true
     }
 
     /// C++ `getOccupancy`: 0 outside the window, -1 for an in-window virtual wall.

@@ -459,6 +459,38 @@ fn cloud_requires_independent_odom_and_does_not_remove_obstacles() {
 }
 
 #[test]
+fn overlapping_radius_four_inflation_matches_world_cells_across_ring_seams() {
+    let mut map = GridMap::new(MappingParameters {
+        local_update_range: [9.; 3],
+        obstacles_inflation: 4.,
+        ..parameters()
+    })
+    .unwrap();
+    map.odom_callback(Isometry3::identity()).unwrap();
+    let centers = [Vector3::new(-1, 0, 1), Vector3::new(3, -2, 0)];
+    map.cloud_callback(&centers.map(|p| p.cast::<f64>() + Vector3::repeat(0.25)));
+    for z in -8..9 {
+        for y in -8..9 {
+            for x in -8..9 {
+                let id = Vector3::new(x, y, z);
+                let expected: i32 = centers
+                    .iter()
+                    .map(|c| i32::from((id - c).abs().max() <= 4) + 32767 * i32::from(id == *c))
+                    .sum();
+                assert_eq!(
+                    map.inflated_occupancy_at(id.cast::<f64>() + Vector3::repeat(0.25)),
+                    expected
+                );
+            }
+        }
+    }
+    map.depth_pose_callback(depth(0), Isometry3::translation(25., 0., 0.))
+        .unwrap();
+    map.update_at(10., 10.).unwrap();
+    assert!(map.inflation_buffer().iter().all(|&count| count == 0));
+}
+
+#[test]
 fn virtual_wall_is_checked_after_window_membership() {
     let mut map = GridMap::new(parameters()).unwrap();
     map.reference_wall = Some((-0.1, 3.));

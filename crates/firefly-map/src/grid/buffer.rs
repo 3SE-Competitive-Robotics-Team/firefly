@@ -98,6 +98,23 @@ impl<T: Copy> Buffer<T> {
 }
 
 impl<T: Copy + PartialEq> Buffer<T> {
+    #[cfg(feature = "depth")]
+    pub(crate) fn fill_range(&mut self, mut start: usize, end: usize, value: T) {
+        while start < end {
+            let offset = start % PAGE_LEN;
+            let len = (end - start).min(PAGE_LEN - offset);
+            let page = &self.pages[start / PAGE_LEN];
+            if page.uniform != Some(value)
+                && page.data[offset..offset + len].iter().any(|&v| v != value)
+            {
+                let page = Arc::make_mut(&mut Arc::make_mut(&mut self.pages)[start / PAGE_LEN]);
+                page.data[offset..offset + len].fill(value);
+                page.uniform = (len == PAGE_LEN).then_some(value);
+            }
+            start += len;
+        }
+    }
+
     pub(crate) fn is_known_uniform(&self, value: T) -> bool {
         self.pages.iter().all(|page| page.uniform == Some(value))
     }
