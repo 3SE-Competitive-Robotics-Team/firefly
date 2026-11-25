@@ -2,6 +2,7 @@ mod config;
 mod model;
 mod offline;
 mod runtime;
+mod takeoff_replay;
 mod tracking;
 
 use config::{Config, validate};
@@ -19,6 +20,9 @@ struct Arguments {
     /// 单幅 352×288 图像的离线处理
     #[usage(long)]
     image: Option<PathBuf>,
+    /// 回放一次停机坪起飞的下视帧和估计量，输出接管判据
+    #[usage(long)]
+    takeoff_replay: Option<PathBuf>,
     /// 显式选择 CPU，用于桌面仿真和离线比较
     #[usage(long)]
     simulation: bool,
@@ -45,6 +49,12 @@ fn run_app() -> firefly_error::Result<()> {
         .config
         .unwrap_or_else(|| firefly_config::paths::config("landing.toml"));
     let mut config: Config = firefly_config::startup(path, firefly_observability::init, validate)?;
+    if let Some(path) = args.takeoff_replay {
+        if args.image.is_some() {
+            return Err(invalid("select one offline input"));
+        }
+        return takeoff_replay::run(&config.tracking(), &path);
+    }
     let game = firefly_config::game::load()?;
     if args.simulation {
         config.backend = model::Backend::Cpu;

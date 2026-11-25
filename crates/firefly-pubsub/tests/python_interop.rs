@@ -22,10 +22,11 @@ from firefly_ipc.messages import SCALAR_BUFFER_SIZE, ScalarMessage, VizMessage, 
 from firefly_ipc.messages import GoalMessage, PlannerStatusMessage, LandingTargetMessage, ActivityMessage
 from firefly_ipc.messages import LogMessage, NavigationMessage, VIZ_MAX_PUBLISHERS
 from firefly_ipc.messages import FC_STATUS_BUFFER_SIZE, FcStatusMessage
-from firefly_ipc.messages import CameraCalibration, CameraRig, VioPrediction
+from firefly_ipc.messages import AttitudeMessage, CameraCalibration, CameraRig, VioPrediction
 from firefly_ipc.activity import LANDING
 for cls, fields in [
     (CameraRig, ['right', 'down']),
+    (AttitudeMessage, ['posterior_time', 'stereo_landmarks']),
     (CameraCalibration, ['intrinsics', 'translation', 'rotation_xyzw']),
     (VioPrediction, ['sequence', 'position', 'quat_xyzw', 'velocity', 'angular_velocity', 'posterior_age_s', 'has_attitude']),
     (FcStatusMessage, ['timestamp', 'sequence', 'mode', 'can_arm']),
@@ -34,7 +35,7 @@ for cls, fields in [
     (VoxelMessage, ['voxels', 'sequence', 'chunk_index', 'chunk_count']),
     (GoalMessage, ['timestamp', 'arrival', 'next_position']),
     (PlannerStatusMessage, ['timestamp', 'goal_timestamp', 'finished', 'passed']),
-    (LandingTargetMessage, ['timestamp', 'session', 'position', 'confidence', 'team', 'valid']),
+    (LandingTargetMessage, ['timestamp', 'session', 'position', 'confidence', 'team', 'valid', 'h_pose_valid', 'body_from_h_translation', 'body_from_h_xyzw', 'h_pose_reprojection_px']),
     (ActivityMessage, ['timestamp', 'owner', 'sequence', 'mask', 'lease_ms']),
     (LogMessage, ['sim_time', 'sequence', 'dropped_records']),
     (NavigationMessage, ['odom', 'translation', 'rotation', 'revision', 'external_map']),
@@ -50,6 +51,7 @@ print(LANDING)
 #[ignore = "requires the synced workspace Python environment"]
 fn viz_python_layout_matches_rust_offsets_and_sizes() {
     use firefly_pubsub::activity::ActivityMessage;
+    use firefly_pubsub::attitude::AttitudeMessage;
     use firefly_pubsub::fc_status::{FC_STATUS_BUFFER_SIZE, FcStatusMessage};
     use firefly_pubsub::goal::GoalMessage;
     use firefly_pubsub::landing::LandingTargetMessage;
@@ -69,6 +71,9 @@ fn viz_python_layout_matches_rust_offsets_and_sizes() {
             size_of::<CameraRig>(),
             offset_of!(CameraRig, right),
             offset_of!(CameraRig, down),
+            size_of::<AttitudeMessage>(),
+            offset_of!(AttitudeMessage, posterior_time),
+            offset_of!(AttitudeMessage, stereo_landmarks),
             size_of::<CameraCalibration>(),
             offset_of!(CameraCalibration, intrinsics),
             offset_of!(CameraCalibration, translation),
@@ -115,6 +120,10 @@ fn viz_python_layout_matches_rust_offsets_and_sizes() {
             offset_of!(LandingTargetMessage, confidence),
             offset_of!(LandingTargetMessage, team),
             offset_of!(LandingTargetMessage, valid),
+            offset_of!(LandingTargetMessage, h_pose_valid),
+            offset_of!(LandingTargetMessage, body_from_h_translation),
+            offset_of!(LandingTargetMessage, body_from_h_xyzw),
+            offset_of!(LandingTargetMessage, h_pose_reprojection_px),
             size_of::<ActivityMessage>(),
             offset_of!(ActivityMessage, timestamp),
             offset_of!(ActivityMessage, owner),

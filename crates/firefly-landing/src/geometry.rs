@@ -1,6 +1,6 @@
 //! 共面 H 图案角点与标定针孔几何；图案外接矩形具有四个实际白色凸角。
 use crate::{Detection, Result, invalid};
-use nalgebra::{Isometry3, Point3, Vector2, Vector3};
+use nalgebra::{Isometry3, Matrix3, Point3, Translation3, UnitQuaternion, Vector2, Vector3};
 use serde::Deserialize;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -34,7 +34,73 @@ pub struct PlaneTarget {
     pub reprojection_px: f64,
 }
 
+/// 四角从 H 的两根竖划确定横轴，首角和对角互换代表同一观测。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HOutline {
+    /// 外接矩形，供水平坪面的重力辅助位置估计使用。
+    pub rectangle: [[f64; 2]; 4],
+    /// 轮廓凸包上的四个端点，保留透视缩短。
+    pub corners: [[f64; 2]; 4],
+}
+
+/// 光学相机 ← H；另一等价解为右乘绕 H 的 Z 轴半周旋转。
+pub struct MarkerPose {
+    pub camera_from_h: Isometry3<f64>,
+    pub reprojection_px: f64,
+}
+
 impl Geometry {
+    /// 从四角的标定射线恢复米制矩形的平移和三轴旋转，H 的正 Z 指向坪面上方。
+    #[must_use]
+    pub fn marker_pose(&self, outline: &HOutline) -> Option<MarkerPose> {
+        let mut rays = [Vector3::zeros(); 4];
+        for (ray, pixel) in rays.iter_mut().zip(outline.corners) {
+            *ray = self.ray(Vector2::from(pixel))?.push(1.);
+        }
+        // A rectangle's diagonals share their midpoint in 3D. Fix the first depth
+        // to one, solve for the other three, then recover scale from both edges.
+        let depths = Matrix3::from_columns(&[rays[1], -rays[2], rays[3]])
+            .lu()
+            .solve(&rays[0])?;
+        if !depths.iter().all(|d| d.is_finite() && *d > 0.) {
+            return None;
+        }
+        let points = [
+            rays[0],
+            rays[1] * depths.x,
+            rays[2] * depths.y,
+            rays[3] * depths.z,
+        ];
+        let [w, h] = self.marker_size;
+        let across = (points[1] - points[0] + points[2] - points[3]) / (2. * w);
+        let along = (points[0] - points[3] + points[1] - points[2]) / (2. * h);
+        let scale = 2. / (across.norm() + along.norm());
+        let normal = across.cross(&along).try_normalize(1e-9)?;
+        let x_axis = (across + along.cross(&normal)).try_normalize(1e-9)?;
+        let axes = Matrix3::from_columns(&[x_axis, normal.cross(&x_axis), normal]);
+        let center = points.into_iter().sum::<Vector3<f64>>() * (scale / 4.);
+        if normal.dot(&center) >= 0. {
+            return None;
+        }
+        let pose = Isometry3::from_parts(
+            Translation3::from(center),
+            UnitQuaternion::from_matrix(&axes),
+        );
+        let mut error = 0.;
+        for (ray, (x, y)) in rays.iter().zip([(-w, h), (w, h), (w, -h), (-w, -h)]) {
+            let point = pose * Point3::new(x / 2., y / 2., 0.);
+            if point.z <= 0. {
+                return None;
+            }
+            error += ((point.x / point.z - ray.x) * self.intrinsics[0]).powi(2)
+                + ((point.y / point.z - ray.y) * self.intrinsics[1]).powi(2);
+        }
+        let rms = (error / 4.).sqrt();
+        (rms <= self.max_reprojection_px).then_some(MarkerPose {
+            camera_from_h: pose,
+            reprojection_px: rms,
+        })
+    }
     /// Fit the rectangle on a horizontal support plane using odometry gravity.
     /// Orthogonal Procrustes keeps front-facing planar depth stable under pixel noise.
     /// The H pattern retains its 180-degree heading ambiguity.
@@ -152,12 +218,12 @@ impl Geometry {
 /// Coordinates refer to pixel centers in the source image.
 /// # Errors
 /// The buffer length must match the image dimensions.
-pub fn corner_candidates(
+pub fn outline_candidates(
     gray: &[u8],
     width: usize,
     height: usize,
     detection: Detection,
-) -> Result<Vec<[[f64; 2]; 4]>> {
+) -> Result<Vec<HOutline>> {
     if width.checked_mul(height) != Some(gray.len()) {
         return Err(invalid("corner image dimensions"));
     }
@@ -180,10 +246,13 @@ pub fn corner_candidates(
     if high - low >= 40 {
         for percent in [85, 95, 65] {
             let threshold = low + (u16::from(high - low) * percent / 100) as u8;
-            if let Some(outline) = largest_h(&pixels, rw, rh, threshold) {
-                let corners = outline.map(|p| [p.x + left as f64, p.y + top as f64]);
-                if !candidates.contains(&corners) {
-                    candidates.push(corners);
+            if let Some(mut outline) = largest_h(&pixels, rw, rh, threshold) {
+                for p in outline.rectangle.iter_mut().chain(&mut outline.corners) {
+                    p[0] += left as f64;
+                    p[1] += top as f64;
+                }
+                if !candidates.contains(&outline) {
+                    candidates.push(outline);
                 }
             }
         }
@@ -200,14 +269,30 @@ pub fn refine_corners(
     height: usize,
     detection: Detection,
 ) -> Result<Option<[[f64; 2]; 4]>> {
-    Ok(corner_candidates(gray, width, height, detection)?
+    Ok(outline_candidates(gray, width, height, detection)?
         .into_iter()
-        .next())
+        .next()
+        .map(|o| o.rectangle))
 }
 
-fn largest_h(pixels: &[u8], rw: usize, rh: usize, threshold: u8) -> Option<[Vector2<f64>; 4]> {
+/// 外接矩形按亮度门限排列，像素坐标与原图一致。
+/// # Errors
+/// 输入长度须与宽高一致。
+pub fn corner_candidates(
+    gray: &[u8],
+    width: usize,
+    height: usize,
+    detection: Detection,
+) -> Result<Vec<[[f64; 2]; 4]>> {
+    Ok(outline_candidates(gray, width, height, detection)?
+        .into_iter()
+        .map(|o| o.rectangle)
+        .collect())
+}
+
+fn largest_h(pixels: &[u8], rw: usize, rh: usize, threshold: u8) -> Option<HOutline> {
     let mut visited = vec![false; pixels.len()];
-    let mut best: Option<(usize, [Vector2<f64>; 4])> = None;
+    let mut best: Option<(usize, HOutline)> = None;
     for seed in 0..pixels.len() {
         if visited[seed] || pixels[seed] <= threshold {
             continue;
@@ -258,20 +343,35 @@ fn largest_h(pixels: &[u8], rw: usize, rh: usize, threshold: u8) -> Option<[Vect
                 && (0..rh as isize).contains(&y)
                 && pixels[y as usize * rw + x as usize] > threshold
         };
-        if [(width_axis, height_axis), (height_axis, -width_axis)]
+        if let Some((across, along)) = [(width_axis, height_axis), (height_axis, -width_axis)]
             .into_iter()
-            .any(|(u, v)| matches_h(|x, y| is_white(center + u * x + v * y)))
+            .find(|&(u, v)| matches_h(|x, y| is_white(center + u * x + v * y)))
         {
-            let u = width_axis * 0.5;
-            let v = height_axis * 0.5;
+            let u = across * 0.5;
+            let v = along * 0.5;
+            let rectangle = [
+                center - u - v,
+                center + u - v,
+                center + u + v,
+                center - u + v,
+            ];
+            let corners = rectangle.map(|p| {
+                let nearest = hull
+                    .iter()
+                    .min_by(|a, b| {
+                        (p - **a)
+                            .norm_squared()
+                            .total_cmp(&(p - **b).norm_squared())
+                    })
+                    .expect("convex hull has at least four vertices");
+                [nearest.x, nearest.y]
+            });
             best = Some((
                 count,
-                [
-                    center - u - v,
-                    center + u - v,
-                    center + u + v,
-                    center - u + v,
-                ],
+                HOutline {
+                    rectangle: rectangle.map(|p| [p.x, p.y]),
+                    corners,
+                },
             ));
         }
     }
@@ -489,6 +589,47 @@ mod tests {
             refine_corners(&image, 100, 100, detection)
                 .unwrap()
                 .is_some()
+        );
+    }
+    #[test]
+    fn projective_h_recovers_translation_and_all_three_rotations_modulo_half_turn() {
+        let geometry = Geometry::default();
+        let [w, h] = geometry.marker_size;
+        let pose = Isometry3::from_parts(
+            Translation3::new(0.04, -0.07, 0.8),
+            UnitQuaternion::from_euler_angles(2.76, -0.19, 0.62),
+        );
+        let corners = [(-w, h), (w, h), (w, -h), (-w, -h)].map(|(x, y)| {
+            let p = pose * Point3::new(x / 2., y / 2., 0.);
+            let [fx, fy, cx, cy] = geometry.intrinsics;
+            [cx + fx * p.x / p.z, cy + fy * p.y / p.z]
+        });
+        for offset in [0, 2] {
+            let ordered = std::array::from_fn(|i| corners[(i + offset) % 4]);
+            let result = geometry
+                .marker_pose(&HOutline {
+                    rectangle: [[0.; 2]; 4],
+                    corners: ordered,
+                })
+                .unwrap();
+            let truth = if offset == 0 {
+                pose.rotation
+            } else {
+                pose.rotation
+                    * UnitQuaternion::from_axis_angle(&Vector3::z_axis(), std::f64::consts::PI)
+            };
+            assert!(result.camera_from_h.rotation.angle_to(&truth) < 1e-8);
+            assert!(
+                (result.camera_from_h.translation.vector - pose.translation.vector).norm() < 1e-8
+            );
+        }
+        assert!(
+            geometry
+                .marker_pose(&HOutline {
+                    rectangle: corners,
+                    corners: [corners[0]; 4]
+                })
+                .is_none()
         );
     }
 }

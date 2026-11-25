@@ -214,6 +214,7 @@ mod tests {
             attitude_session_ok: true,
             landing_thrust_low: true,
             landing_motion_low: true,
+            landing_horizontal: crate::LandingHorizontalMotion::Odometry,
         }
     }
 

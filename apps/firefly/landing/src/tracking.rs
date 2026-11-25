@@ -2,7 +2,8 @@
 use firefly_landing::Detection;
 #[cfg(test)]
 use firefly_landing::geometry::refine_corners;
-use firefly_landing::geometry::{Geometry, corner_candidates};
+use firefly_landing::geometry::{Geometry, HOutline, MarkerPose, outline_candidates};
+use firefly_pubsub::camera::{DOWN_HEIGHT, DOWN_WIDTH};
 use firefly_pubsub::landing::LandingTargetMessage;
 use nalgebra::{Isometry3, Vector3};
 
@@ -77,6 +78,7 @@ impl Acquisition {
 }
 
 struct Candidate {
+    outline: HOutline,
     target: Vector3<f64>,
     reprojection_px: f64,
     confidence: f64,
@@ -119,10 +121,7 @@ impl Tracker {
             team,
             ..Default::default()
         };
-        if session == 0
-            || !stamp.is_finite()
-            || self.stamp.is_some_and(|previous| stamp <= previous)
-        {
+        if !stamp.is_finite() || self.stamp.is_some_and(|previous| stamp <= previous) {
             return message;
         }
         if self
@@ -133,8 +132,21 @@ impl Tracker {
             self.acquisition = Acquisition::Searching;
         }
         self.stamp = Some(stamp);
-        let Some(body) = pose else {
+        let Some(body) = pose.filter(|_| session != 0) else {
             log::debug!(target: "landing::gates", "stamp={stamp:.3} no capture-time odometry");
+            let full = Detection {
+                bounds: [0., 0., DOWN_WIDTH as f32, DOWN_HEIGHT as f32],
+                confidence: 1.,
+            };
+            if let Ok(outlines) =
+                outline_candidates(observation.image, DOWN_WIDTH, DOWN_HEIGHT, full)
+                && let Some(v) = outlines
+                    .iter()
+                    .filter_map(|o| self.settings.geometry.marker_pose(o))
+                    .min_by(|a, b| a.reprojection_px.total_cmp(&b.reprojection_px))
+            {
+                self.set_raw_pose(&mut message, &v);
+            }
             self.acquisition.missed();
             return message;
         };
@@ -157,7 +169,18 @@ impl Tracker {
         message.reprojection_px = candidate.reprojection_px;
         message.confidence = candidate.confidence;
         message.valid = u32::from(confirmed);
+        if let Some(visual) = self.settings.geometry.marker_pose(&candidate.outline) {
+            self.set_raw_pose(&mut message, &visual);
+        }
         message
+    }
+
+    fn set_raw_pose(&self, message: &mut LandingTargetMessage, visual: &MarkerPose) {
+        let pose = self.settings.camera_in_body * visual.camera_from_h;
+        message.body_from_h_translation = pose.translation.vector.into();
+        message.body_from_h_xyzw = pose.rotation.coords.into();
+        message.h_pose_reprojection_px = visual.reprojection_px;
+        message.h_pose_valid = 1;
     }
 
     fn select_candidate(
@@ -187,7 +210,7 @@ impl Tracker {
             confidence: value.confidence as f32,
         });
         for detection in detections.iter().copied().take(8).chain(tracked) {
-            let Ok(candidates) = corner_candidates(
+            let Ok(candidates) = outline_candidates(
                 image,
                 firefly_pubsub::camera::DOWN_WIDTH,
                 firefly_pubsub::camera::DOWN_HEIGHT,
@@ -195,9 +218,13 @@ impl Tracker {
             ) else {
                 continue;
             };
-            for corners in candidates {
+            for outline in candidates {
                 gates[0] += 1;
-                let Some(plane) = self.settings.geometry.horizontal_target(corners, &camera) else {
+                let Some(plane) = self
+                    .settings
+                    .geometry
+                    .horizontal_target(outline.rectangle, &camera)
+                else {
                     continue;
                 };
                 gates[1] += 1;
@@ -215,6 +242,7 @@ impl Tracker {
                     .is_none_or(|old| (target - reference).norm() < (old.target - reference).norm())
                 {
                     best = Some(Candidate {
+                        outline,
                         target,
                         reprojection_px: plane.reprojection_px,
                         confidence: f64::from(detection.confidence),
@@ -323,6 +351,28 @@ mod tests {
             .unwrap();
             assert!(corners.is_some(), "white H lost in {name}");
         }
+    }
+
+    #[test]
+    fn raw_pose_survives_without_vio_while_contact_target_waits() {
+        let image = image::open(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/reference/flight3/15.png"
+        ))
+        .unwrap()
+        .to_luma8();
+        let mut tracker = Tracker::new(crate::config::Config::default().tracking());
+        let msg = tracker.process(Observation {
+            timestamp: 1.,
+            session: 0,
+            team: 0,
+            image: image.as_raw(),
+            detections: &[],
+            pose: None,
+        });
+        assert_eq!((msg.h_pose_valid, msg.valid), (1, 0));
+        assert!(msg.body_from_h_translation[2] < 0.);
+        assert!((msg.body_from_h_xyzw.iter().map(|x| x * x).sum::<f64>() - 1.).abs() < 1e-8);
     }
 
     #[test]

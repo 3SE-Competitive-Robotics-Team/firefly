@@ -378,6 +378,10 @@ def test_stereo_images_and_keypoint_ids_survive_recording():
             frame.data[:]=bytes([173])*len(frame.data)
             down.loan_uninit().write_payload(frame).send()
             observation=LandingTargetMessage(timestamp=2.,session=42,position=(.1,-.2,.3),reprojection_px=.7,confidence=.91,team=1,valid=1)
+            observation.h_pose_valid = 1
+            observation.body_from_h_translation[:] = [.2, -.1, -.9]
+            observation.body_from_h_xyzw[:] = [0., 0., .6, .8]
+            observation.h_pose_reprojection_px = .4
             target.loan_uninit().write_payload(observation).send()
             for camera, port in enumerate(images):
                 msg = GrayImageMessage(timestamp=2., sensor_id=camera, width=320, height=240)
@@ -397,6 +401,7 @@ def test_stereo_images_and_keypoint_ids_survive_recording():
         actual, logs=read(path)
         assert actual["landing/target"]==[(2_000_000_000,[.1,-.2,.3,1.])]
         assert actual["landing/quality"]==[(2_000_000_000,[42.,1.,.7,.91])]
+        assert actual["landing/h_pose_body"]==[(2_000_000_000,[.2,-.1,-.9,0.,0.,.6,.8,.4])]
         assert "recording complete" in logs
         found_images, found_points = set(), set()
         for chunk in recording_chunks(path):
@@ -578,6 +583,7 @@ def test_metric_cards_use_measurement_time_and_preserve_sources():
                    ("rootslam/frame_processing_ms", 1.1, [6.5]),
                    ("vio/prediction/posterior_age_s", 1.2, [.012]),
                    ("vio/diagnostics/tracks", 1.3, [90., 80., 70., 60.]),
+                   ("fc/debug/landing_contact", 1.4, [2., .05, 1., 1.]),
                    ("fc/debug/altitude", 1.5, [1.]), ("fc/debug/altitude", 4.1, [1.])]
         samples.extend(("render/capture/publish_s", 1. + frame / 60., [0., 0., .008])
                        for frame in range(61))

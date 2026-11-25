@@ -40,6 +40,23 @@ cargo xtask deploy-hil
 cargo xtask hil configs/mission-square.toml
 ```
 
+#### 回放 H 坪起飞观测
+
+选取已封口归档和采集时钟上的起止秒数。窗口可以跨多趟任务。导出器复制下视原图，配对各帧之前的传感器样本，并提取截至窗口结束的任务 home、阶段事件。回放按开机、任务 ID、估计会话归属观测。一次旧版帧列表仍可作为单架次实验输入。
+
+```bash
+uv run python scripts/export_takeoff_replay.py logs/runs/log_0161 1.3 7 logs/algorithm-perf/pad-launch-1
+cargo run --release -p landing -- --config configs/landing.toml --takeoff-replay logs/algorithm-perf/pad-launch-1/frames.json
+```
+
+同一个目录可复制到 Orange Pi，用板端 `landing --config configs/landing.toml --takeoff-replay <目录>/frames.json` 回放。每行 JSON 输出一帧的时间、H 坪坐标系下的机体位置（米）、状态和首次接管候选的坐标变换。坐标原点是停机坪中心处的触地机体原点，竖直轴向上，水平朝向取自独立 IMU。H 高度使用已标定的 H 尺寸、相机内外参和独立姿态。归档中的该姿态约 1 Hz，适于评估平缓直升。
+
+任务进入 TAKEOFF 后，须收到本阶段起点之后、年龄至多 0.25 秒的飞控 TAKEOFF 回报；此后 TAKEOFF 和 HOLD 均可维持窗口。连续三帧确认 H。H 高度进入 0.9～1.1 米、VIO 后验年龄在 150 ms 内、至少 8 个双目匹配和 6 个地标、估计速度至多 0.25 m/s 时开始比较。窗口开始时固定 VIO 到局部水平系的变换和 H 在 VIO 系中的位姿。连续 0.5 秒内，位置差须在 6 cm 内，完整三维旋转差须在 5° 内，按 H 的半周对称性比较。纯视觉法向与独立重力夹角超过 25° 时暂停交接。JSON 分别给出原始视觉和重力辅助的机体 ← H 变换；其中平移是机体系米数，旋转是 xyzw 四元数。当前飞行控制仍执行普通起飞。
+
+任务感知回放从持久回执中的 TAKEOFF 阶段事件计时。1.5 秒内未确认 H、跟踪后超过 0.25 秒没有连续有效观测，或 6 秒内未形成接管候选，进入相应的中止状态。导航、精降、恢复和取消关闭本次交接窗口，新的任务重新确认。回放按独立截止时刻输出一次 kind=timeout，即使窗口结束前所有图像均已断流。在线飞控接入时由单调时钟驱动同一判据。
+
+#### USB 看门狗
+
 板端部署会安装并启用 `firefly-usb-watchdog.service`。开机时，原厂 `adbd.service` 准备 ADB 和 FunctionFS。随后 systemd 停止原厂的 UDC 轮询脚本，在 CPU 0 上启动一个 `hil-gadget watchdog`。用 `systemctl status firefly-usb-watchdog` 查看服务，用 `journalctl -b -t firefly-hil-gadget` 查看切换和重绑记录。
 
 看门狗每 5 秒尝试取得 USB 切换锁。锁忙时等下一轮。持锁时按以下规则操作。

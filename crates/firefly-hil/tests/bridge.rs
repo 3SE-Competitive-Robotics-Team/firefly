@@ -296,6 +296,7 @@ fn every_uplink_route_roundtrips_through_ipc_and_wire() {
             quat_xyzw: [0., 0., 0., 1.],
             angular_velocity: [0.; 3],
             gyro_bias: [0.; 3],
+            stereo_landmarks: 12,
         }),
         Message::Reference(ReferenceMessage::default()),
         Message::PlannerStatus(PlannerStatusMessage::default()),

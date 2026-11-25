@@ -2,6 +2,7 @@ mod attitude;
 mod config;
 mod frames;
 mod imu;
+mod landing_motion;
 mod matrix;
 mod matrix_status;
 mod usb;
@@ -264,6 +265,7 @@ fn health_of(inputs: &Inputs) -> Health {
         airframe_ready: inputs.vehicle.is_some(),
         attitude_session_ok: inputs.primary.session_ok(),
         landing_thrust_low: false,
+        landing_horizontal: firefly_flight::LandingHorizontalMotion::Unavailable,
         landing_motion_low: inputs.attitude.is_some_and(|s| {
             s.ready
                 && s.received.elapsed() <= IMU_STALE_LIMIT
@@ -359,6 +361,8 @@ impl CommandSequence {
 }
 
 struct Controller {
+    landing_motion: landing_motion::Observer,
+    contact_sample: Option<[f64; 4]>,
     team: u32,
     landing_identity: Option<(u64, f64)>,
     /// 最近一次控制使用的姿态；所属航向系由 source 决定。
@@ -388,6 +392,8 @@ struct Controller {
 impl Controller {
     fn new(fsm: FsmParams, params: ControlParams) -> Self {
         Self {
+            landing_motion: landing_motion::Observer::default(),
+            contact_sample: None,
             team: firefly_config::game::Team::Red.code(),
             landing_identity: None,
             attitude: UnitQuaternion::identity(),
@@ -407,6 +413,41 @@ impl Controller {
             arming_failed: 0,
             failsafe_flags: FailsafeFlags::default(),
             failsafe_action: FailsafeAction::None,
+        }
+    }
+
+    fn observe_contact(&mut self, inputs: &Inputs, state: &mut QuadState, health: &mut Health) {
+        let ordinary_land = self.fsm.state() == firefly_flight::FlightState::Land
+            && self.fsm.precision_stage().is_none();
+        health.landing_horizontal = self.landing_motion.observe(
+            inputs,
+            ordinary_land.then(|| self.fsm.altitude_above_origin(state)),
+        );
+        let (source, speed) = match health.landing_horizontal {
+            firefly_flight::LandingHorizontalMotion::Unavailable => (0., -1.),
+            firefly_flight::LandingHorizontalMotion::Odometry => (1., state.velocity.xy().norm()),
+            firefly_flight::LandingHorizontalMotion::InertialSpeed(v) => {
+                if let Some(vertical) = self.landing_motion.vertical() {
+                    state.position.z = vertical.z;
+                    state.velocity.z = vertical.vz;
+                }
+                (2., v)
+            }
+        };
+        self.contact_sample = ordinary_land.then_some([
+            source,
+            f64::from(speed),
+            f64::from(health.landing_motion_low),
+            f64::from(health.landing_thrust_low),
+        ]);
+    }
+
+    fn landing_collective(&self, state: &QuadState, health: Health, demand: f32, dt: f32) -> f32 {
+        if self.fsm.may_unload(state, health) {
+            self.multirotor
+                .unload_collective(demand, self.last_thrust, dt)
+        } else {
+            demand
         }
     }
 
@@ -432,7 +473,7 @@ impl Controller {
             .map_or((Vector3::zeros(), Vector3::zeros()), |est| {
                 (est.position, est.velocity)
             });
-        let state = QuadState {
+        let mut state = QuadState {
             position,
             velocity,
             attitude,
@@ -461,12 +502,13 @@ impl Controller {
         };
         self.observe_landing(inputs);
         self.apply_command(inputs.command, command_health, &state);
+        self.observe_contact(inputs, &mut state, &mut health);
         let reference = fresh_reference(inputs);
         let out = self.fsm.update(dt, &state, reference.as_ref(), health);
         self.failsafe_flags = out.flags;
         self.failsafe_action = out.failsafe;
         self.position_target = out.setpoint.position;
-        self.position_error = out.setpoint.position - position;
+        self.position_error = out.setpoint.position - state.position;
         report_event(out.event);
         self.altitude = self.fsm.altitude_above_origin(&state);
         if !out.motors_enabled || !health.imu_alive || !self.attitude_ready {
@@ -500,6 +542,7 @@ impl Controller {
                     -target.yaw_sp_move_rate,
                 )
             };
+        let thrust = self.landing_collective(&state, health, thrust, dt);
         let error = firefly_flight::multirotor::frames::wrap_pi(yaw - state.yaw());
         self.last_thrust = Some(thrust);
         Some(AngleDemand {
@@ -656,6 +699,14 @@ impl Controller {
             Some(firefly_flight::precision::PrecisionStage::Final) => 3.,
             Some(firefly_flight::precision::PrecisionStage::Reacquire) => 4.,
         };
+        if let Some(sample) = self.contact_sample {
+            publish_scalars(
+                ports.viz_ref(),
+                sim_time,
+                "fc/debug/landing_contact",
+                &sample,
+            );
+        }
         publish_scalars(
             ports.viz_ref(),
             sim_time,
@@ -1066,6 +1117,7 @@ mod tests {
                 quat_xyzw: [0., 0., 0., 1.],
                 angular_velocity: [0.; 3],
                 gyro_bias: [0.; 3],
+                stereo_landmarks: 12,
             },
             Instant::now(),
         );
@@ -1078,6 +1130,7 @@ mod tests {
                 rotation: UnitQuaternion::identity(),
                 rate: Vector3::zeros(),
                 specific_force: f64::from(firefly_flight::G),
+                impulse: Vector3::zeros(),
                 ready: true,
                 nis: 0.,
                 accel_accepted: false,
@@ -1094,6 +1147,56 @@ mod tests {
             }),
             ..Inputs::default()
         }
+    }
+
+    #[test]
+    fn blind_landing_uses_recent_visual_speed_and_independent_imu_change() {
+        use firefly_flight::LandingHorizontalMotion::*;
+        let mut inputs = sensor_inputs();
+        let mut observer = landing_motion::Observer::default();
+        inputs.estimate.as_mut().unwrap().velocity.x = 0.03;
+        inputs.estimate.as_mut().unwrap().position.z = 0.12;
+        inputs.estimate.as_mut().unwrap().velocity.z = -0.2;
+        assert!(matches!(observer.observe(&inputs, Some(0.05)), Odometry));
+        let update = |inputs: &mut Inputs, time, landmarks| {
+            let mut message = inputs.primary.latest.unwrap().message;
+            message.timestamp = time;
+            message.posterior_time = time;
+            message.stereo_landmarks = landmarks;
+            assert!(inputs.primary.observe(message, Instant::now()));
+            inputs.attitude.as_mut().unwrap().timestamp = time;
+            inputs.estimate.as_mut().unwrap().timestamp = time;
+        };
+        update(&mut inputs, 1., 12);
+        inputs.attitude.as_mut().unwrap().impulse.x = 0.05;
+        assert!(matches!(observer.observe(&inputs, Some(0.05)), Odometry));
+        update(&mut inputs, 2., 1);
+        inputs.attitude.as_mut().unwrap().impulse.x = 0.10;
+        inputs.attitude.as_mut().unwrap().impulse.z = 0.2;
+        inputs.estimate.as_mut().unwrap().velocity.y = 0.2;
+        assert!(
+            matches!(observer.observe(&inputs, Some(0.05)), InertialSpeed(v) if (v-0.03).abs()<1e-5)
+        );
+        let stopped = observer.vertical().unwrap();
+        assert!(stopped.vz.abs() < 1e-5 && (stopped.z - 0.02).abs() < 1e-5);
+        inputs.attitude.as_mut().unwrap().impulse.y = 0.18;
+        assert!(matches!(observer.observe(&inputs, Some(0.05)), InertialSpeed(v) if v>0.17));
+        update(&mut inputs, 6.01, 0);
+        assert!(matches!(observer.observe(&inputs, Some(0.05)), Unavailable));
+        update(&mut inputs, 6.1, 6);
+        assert!(matches!(observer.observe(&inputs, Some(0.05)), Odometry));
+        update(&mut inputs, 7.11, 6);
+        assert!(matches!(observer.observe(&inputs, Some(0.05)), Odometry));
+        update(&mut inputs, 7.2, 0);
+        assert!(matches!(observer.observe(&inputs, Some(0.05)), InertialSpeed(v) if v>0.17));
+        inputs.attitude.as_mut().unwrap().ready = false;
+        assert!(matches!(observer.observe(&inputs, Some(0.05)), Unavailable));
+        inputs.attitude.as_mut().unwrap().ready = true;
+        assert!(matches!(observer.observe(&inputs, Some(0.05)), Unavailable));
+        update(&mut inputs, 7.3, 12);
+        assert!(matches!(observer.observe(&inputs, Some(0.8)), Odometry));
+        update(&mut inputs, 7.4, 0);
+        assert!(matches!(observer.observe(&inputs, Some(0.05)), Unavailable));
     }
 
     #[test]

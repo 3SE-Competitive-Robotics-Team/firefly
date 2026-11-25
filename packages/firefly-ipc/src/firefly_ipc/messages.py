@@ -194,14 +194,18 @@ class LandingTargetMessage(ctypes.Structure):
         ("position", ctypes.c_double * 3), ("reprojection_px", ctypes.c_double),
         ("confidence", ctypes.c_double), ("team", ctypes.c_uint32),
         ("valid", ctypes.c_uint32),
+        ("h_pose_valid", ctypes.c_uint32),
+        ("body_from_h_translation", ctypes.c_double * 3),
+        ("body_from_h_xyzw", ctypes.c_double * 4),
+        ("h_pose_reprojection_px", ctypes.c_double),
     ]
 
     @staticmethod
     def type_name() -> str:
-        return "FireflyLandingTargetMessage"
+        return "FireflyLandingTargetMessageV2"
 
 
-assert ctypes.sizeof(LandingTargetMessage) == 64
+assert ctypes.sizeof(LandingTargetMessage) == 136
 
 
 class DepthImageMessage(ctypes.Structure):
@@ -502,11 +506,12 @@ class AttitudeMessage(ctypes.Structure):
         ("quat_xyzw", ctypes.c_double * 4),
         ("angular_velocity", ctypes.c_double * 3),
         ("gyro_bias", ctypes.c_double * 3),
+        ("stereo_landmarks", ctypes.c_uint32),
     ]
 
     @staticmethod
     def type_name() -> str:
-        return "FireflyVioAttitude"
+        return "FireflyVioAttitudeV2"
 
 
 class VizMessage(ctypes.Structure):

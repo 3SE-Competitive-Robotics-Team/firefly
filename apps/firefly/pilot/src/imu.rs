@@ -27,6 +27,8 @@ pub struct Snapshot {
     pub rate: Vector3<f32>,
     /// Specific force norm in m/s², independent of VIO velocity drift.
     pub specific_force: f64,
+    /// Integrated acceleration in the standby gravity-aligned frame (m/s).
+    pub impulse: Vector3<f64>,
     pub ready: bool,
     pub nis: f64,
     pub accel_accepted: bool,
@@ -122,9 +124,7 @@ fn run(
         })?;
 
     let mut estimator = Estimator::new(options)?;
-    let mut latest = None;
-    let mut count = 0u64;
-    let mut rejected = false;
+    let mut samples = Samples::default();
     let mut last_log = Instant::now();
     let failure = RefCell::new(None::<Error>);
     {
@@ -139,18 +139,10 @@ fn run(
                     fastrace::prelude::SpanContext::random().sampled(false),
                 );
                 let _guard = root.set_local_parent();
-                observe_batch(
-                    &mut estimator,
-                    &imu,
-                    grounded,
-                    output,
-                    &mut latest,
-                    &mut count,
-                    &mut rejected,
-                )
+                observe_batch(&mut estimator, &imu, grounded, output, &mut samples)
             };
             if last_log.elapsed() >= Duration::from_secs(1) {
-                log::debug!("FC IMU worker 已收 {count} 条");
+                log::debug!("FC IMU worker 已收 {} 条", samples.count);
                 last_log = Instant::now();
             }
             match result {
@@ -189,14 +181,20 @@ fn run(
     Ok(())
 }
 
+#[derive(Default)]
+struct Samples {
+    latest: Option<(Sample, Instant)>,
+    impulse: Vector3<f64>,
+    count: u64,
+    rejected: bool,
+}
+
 fn observe_batch(
     estimator: &mut Estimator,
     imu: &Subscriber<ImuMessage>,
     grounded: &AtomicBool,
     output: &Mutex<Option<Snapshot>>,
-    latest: &mut Option<(Sample, Instant)>,
-    count: &mut u64,
-    rejected: &mut bool,
+    samples: &mut Samples,
 ) -> Result<()> {
     let mut changed = false;
     while let Some(msg) = imu.receive()? {
@@ -215,21 +213,28 @@ fn observe_batch(
         };
         match estimator.observe(sample, grounded.load(Ordering::Relaxed)) {
             Ok(true) => {
-                *latest = Some((sample, Instant::now()));
-                *count += 1;
+                if let Some(state) = estimator.state()
+                    && let Some((previous, _)) = samples.latest
+                {
+                    let acceleration =
+                        state.rotation * sample.accel - Vector3::z() * f64::from(firefly_flight::G);
+                    samples.impulse += acceleration * (sample.timestamp - previous.timestamp);
+                }
+                samples.latest = Some((sample, Instant::now()));
+                samples.count += 1;
                 changed = true;
             }
             Ok(false) => {}
             Err(error) => {
-                if !*rejected {
+                if !samples.rejected {
                     log::warn!("IMU 样本拒绝: {error}");
                 }
-                *rejected = true;
+                samples.rejected = true;
                 changed = true;
             }
         }
     }
-    if changed && let Some((sample, received)) = *latest {
+    if changed && let Some((sample, received)) = samples.latest {
         let state = estimator.state();
         let rotation = state.map_or(UnitQuaternion::identity(), |s| s.rotation.cast::<f32>());
         let bias = state.map_or([0.; 3], |s| [s.bias.x, s.bias.y, s.bias.z]);
@@ -237,10 +242,11 @@ fn observe_batch(
             *value = Some(Snapshot {
                 timestamp: sample.timestamp,
                 received,
-                count: *count,
+                count: samples.count,
                 rotation,
                 rate: estimator.rate().cast::<f32>(),
                 specific_force: sample.accel.norm(),
+                impulse: samples.impulse,
                 ready: state.is_some(),
                 nis: estimator.gate().nis,
                 accel_accepted: estimator.gate().accepted,

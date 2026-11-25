@@ -126,6 +126,15 @@ impl Event {
             }
             Self::Navigation(msg) => archive.navigation(*msg),
             Self::Landing(msg) => {
+                if msg.h_pose_valid == 1 {
+                    let [x, y, z] = msg.body_from_h_translation;
+                    let [qx, qy, qz, qw] = msg.body_from_h_xyzw;
+                    archive.scalar(
+                        "landing/h_pose_body",
+                        msg.timestamp,
+                        &[x, y, z, qx, qy, qz, qw, msg.h_pose_reprojection_px],
+                    )?;
+                }
                 archive.scalar(
                     "landing/target",
                     msg.timestamp,
