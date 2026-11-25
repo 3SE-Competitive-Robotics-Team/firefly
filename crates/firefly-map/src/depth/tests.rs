@@ -19,6 +19,27 @@ fn parameters() -> MappingParameters {
 }
 
 #[test]
+fn first_point_in_endpoint_voxel_selects_the_path_and_all_points_vote() {
+    use super::raycast::FrameRays;
+
+    let left = Vector3::new(3.125, 3.875, 0.5);
+    let bottom = Vector3::new(3.875, 3.125, 0.5);
+    let address = |cell: Vector3<i32>| usize::try_from(4 * cell.y + cell.x).unwrap();
+    let endpoint = address(Vector3::new(3, 3, 0));
+    let x_step = 1_u64 << address(Vector3::new(2, 3, 0));
+    let y_step = 1_u64 << address(Vector3::new(3, 2, 0));
+    for (first, second, expected_step) in [(left, bottom, x_step), (bottom, left, y_step)] {
+        let mut rays = FrameRays::new(16, true);
+        rays.endpoint(endpoint, first, false);
+        rays.endpoint(endpoint, second, true);
+        rays.endpoint(endpoint, second, true);
+        rays.trace(Vector3::new(0.5, 0.5, 0.5), address);
+        assert_eq!(rays.votes(endpoint), (2, 2));
+        assert_eq!(rays.visited[0] & (x_step | y_step), expected_step);
+    }
+}
+
+#[test]
 fn rejected_projection_preserves_window_and_allows_retry_with_the_same_stamp() {
     use super::{DepthMapper, FrameUpdate};
     let output = crate::GridMapBuilder::new(1., [8; 3]).build().unwrap();
