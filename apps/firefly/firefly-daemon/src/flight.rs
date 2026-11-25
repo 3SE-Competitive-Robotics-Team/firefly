@@ -23,6 +23,7 @@ enum Step {
     AwaitArmed,
     Takeoff,
     Hover,
+    RequestTrack { last_fc_report: Option<u64> },
     Navigate,
     Hold,
     Dwell,
@@ -36,12 +37,26 @@ enum Step {
     Interrupted,
 }
 impl Step {
+    fn request_track(&mut self, mode: Mode, report: u64, stream_ready: bool) -> bool {
+        let Self::RequestTrack { last_fc_report } = self else {
+            return false;
+        };
+        match mode {
+            Mode::Track => *self = Self::Navigate,
+            Mode::Hold if stream_ready && Some(report) != *last_fc_report => {
+                *last_fc_report = Some(report);
+                return true;
+            }
+            _ => {}
+        }
+        false
+    }
     fn phase(self) -> Phase {
         match self {
             Self::SendArm | Self::AwaitArmed => Phase::Arm,
             Self::Takeoff => Phase::Takeoff,
             Self::Hover => Phase::Hover,
-            Self::Navigate => Phase::Navigate,
+            Self::RequestTrack { .. } | Self::Navigate => Phase::Navigate,
             Self::Hold => Phase::Hold,
             Self::Dwell => Phase::Dwell,
             Self::Acquire(_) => Phase::Acquire,
@@ -55,7 +70,7 @@ impl Step {
     }
     fn timeout(self, dwell: f64) -> Duration {
         Duration::from_secs_f64(match self {
-            Self::Navigate => 100.,
+            Self::RequestTrack { .. } | Self::Navigate => 100.,
             Self::RequestLanding | Self::AwaitDisarm => 45.,
             Self::Dwell | Self::Hover => dwell * 2. + 30.,
             _ => 30.,
@@ -206,7 +221,9 @@ impl Flight {
             .is_some_and(|w| w.arrival == Arrival::Pass)
     }
     fn navigate(&mut self, reuse: bool) {
-        self.enter(Step::Navigate);
+        self.enter(Step::RequestTrack {
+            last_fc_report: None,
+        });
         if !reuse {
             self.goal = (self.sequence as f64 / 1e9).max(self.goal.next_up());
         }
@@ -239,7 +256,12 @@ impl Flight {
                 ..Default::default()
             })?;
         }
-        if mode == Mode::Hold && reference && planner.is_some() {
+        if let Some(fc) = bus.fc.fresh()
+            && self
+                .step
+                .request_track(mode, fc.sequence, reference && planner.is_some())
+        {
+            self.sequence = nanos().max(self.sequence + 1);
             bus.command(kind::TRACK, 0., self.sequence)?;
         }
         if mode == Mode::Track && passing && planner.is_some_and(|p| p.passed == 1) {
@@ -438,6 +460,19 @@ mod contract {
     use super::{Flight, Mode, Phase, Receipt, Step, TargetWindow, kind};
     use firefly_mission::Phase::*;
     use firefly_pubsub::landing::LandingTargetMessage;
+
+    #[test]
+    fn track_retries_on_fresh_hold_reports_until_acknowledged() {
+        let mut step = Step::RequestTrack {
+            last_fc_report: None,
+        };
+        assert!(!step.request_track(Mode::Hold, 7, false));
+        assert!(step.request_track(Mode::Hold, 7, true));
+        assert!(!step.request_track(Mode::Hold, 7, true));
+        assert!(step.request_track(Mode::Hold, 8, true));
+        assert!(!step.request_track(Mode::Track, 9, true));
+        assert!(!step.request_track(Mode::Hold, 10, true));
+    }
 
     fn receipt(phase: Phase) -> Receipt {
         let old = serde_json::json!({

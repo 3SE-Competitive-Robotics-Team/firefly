@@ -638,7 +638,7 @@ impl PlannerManager {
         now: f64,
         touch_goal: bool,
     ) -> bool {
-        if !self.set_local_traj(result.trajectory.clone(), now, touch_goal, self.traj_id + 1) {
+        if !self.set_local_traj(result.trajectory, now, touch_goal, self.traj_id + 1) {
             return false;
         }
         self.traj_id += 1;
@@ -658,7 +658,7 @@ impl PlannerManager {
         let initial_yaw = self.initial_yaw(now);
         let yaw = if let Some(context) = &self.motion_context {
             let Some(motion) = crate::motion::coordinate(
-                &traj,
+                traj,
                 self.map(),
                 context,
                 initial_yaw,
