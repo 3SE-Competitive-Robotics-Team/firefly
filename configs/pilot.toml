@@ -1,4 +1,5 @@
 device = "/dev/serial/by-id/usb-Betaflight_Betaflight_-_BETAFPVG473_V2_207A315E5346-if00"
 
 [control.position]
+vel_max_horizontal = 3.0
 vel_p = [2.4, 2.4, 4.0]

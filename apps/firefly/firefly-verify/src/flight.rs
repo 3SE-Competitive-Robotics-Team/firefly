@@ -303,8 +303,12 @@ impl Track<'_> {
                 let error = dist(nearest);
                 let speed = self.speeds[nearest].xy().norm();
                 report.check(
-                    error <= 0.35 && speed > 0.25,
-                    format!("waypoint {i}: physical fly-through missed or stopped"),
+                    error <= 0.35,
+                    format!("waypoint {i}: fly-through distance {error:.3}m exceeds 0.35m"),
+                );
+                report.check(
+                    speed > 0.25,
+                    format!("waypoint {i}: fly-through horizontal speed {speed:.3}m/s at closest approach must exceed 0.25m/s"),
                 );
                 max_error = max_error.max(error);
                 waypoints.push(json!({"index":i,"arrival":"pass","closest_error_m":error,"pass_speed_mps":speed}));

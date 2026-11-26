@@ -86,6 +86,26 @@ impl DepthMapper {
         self.grid.sample_depth(width, height, source, convert)
     }
 
+    /// Sample a new image, reusing storage from the last completed integration when available.
+    /// # Errors
+    /// Rejects mismatched or empty input dimensions.
+    pub fn sample_next_depth<T: Copy>(
+        &mut self,
+        width: usize,
+        height: usize,
+        source: &[T],
+        convert: impl FnMut(T) -> u16,
+    ) -> Result<DepthImage> {
+        DepthImage::sample(
+            width,
+            height,
+            source,
+            self.grid.sampling(),
+            self.grid.take_integrated_pixels(),
+            convert,
+        )
+    }
+
     /// Fuse one depth image using its synchronized body pose in odometry coordinates.
     /// # Errors
     /// Rejects invalid clocks, poses, depth layouts and out-of-range projections.

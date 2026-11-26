@@ -5,6 +5,7 @@ use firefly_flight::FlightState as Mode;
 use firefly_mission::{Arrival, Phase, Plan};
 use firefly_pubsub::{
     command::kind,
+    fc_status::FcStatusMessage,
     goal::{GoalMessage, PASS, STOP},
     odom::OdomMessage,
 };
@@ -23,30 +24,45 @@ enum Step {
     AwaitArmed,
     Takeoff,
     Hover,
+    RequestTrack { last_fc_report: Option<u64> },
     Navigate,
     Hold,
     Dwell,
     Acquire(TargetWindow),
     RequestLanding,
     AwaitDisarm,
-    Ground,
+    Ground { first: f64, last: FcStatusMessage },
     Recover { command: Option<RecoveryCommand> },
     NeedsOperator,
     Complete,
     Interrupted,
 }
 impl Step {
+    fn request_track(&mut self, mode: Mode, report: u64, stream_ready: bool) -> bool {
+        let Self::RequestTrack { last_fc_report } = self else {
+            return false;
+        };
+        match mode {
+            Mode::Track => *self = Self::Navigate,
+            Mode::Hold if stream_ready && Some(report) != *last_fc_report => {
+                *last_fc_report = Some(report);
+                return true;
+            }
+            _ => {}
+        }
+        false
+    }
     fn phase(self) -> Phase {
         match self {
             Self::SendArm | Self::AwaitArmed => Phase::Arm,
             Self::Takeoff => Phase::Takeoff,
             Self::Hover => Phase::Hover,
-            Self::Navigate => Phase::Navigate,
+            Self::RequestTrack { .. } | Self::Navigate => Phase::Navigate,
             Self::Hold => Phase::Hold,
             Self::Dwell => Phase::Dwell,
             Self::Acquire(_) => Phase::Acquire,
             Self::RequestLanding | Self::AwaitDisarm => Phase::Land,
-            Self::Ground => Phase::Ground,
+            Self::Ground { .. } => Phase::Ground,
             Self::Recover { .. } => Phase::Recover,
             Self::NeedsOperator => Phase::NeedsOperator,
             Self::Complete => Phase::Complete,
@@ -55,7 +71,7 @@ impl Step {
     }
     fn timeout(self, dwell: f64) -> Duration {
         Duration::from_secs_f64(match self {
-            Self::Navigate => 100.,
+            Self::RequestTrack { .. } | Self::Navigate => 100.,
             Self::RequestLanding | Self::AwaitDisarm => 45.,
             Self::Dwell | Self::Hover => dwell * 2. + 30.,
             _ => 30.,
@@ -206,7 +222,9 @@ impl Flight {
             .is_some_and(|w| w.arrival == Arrival::Pass)
     }
     fn navigate(&mut self, reuse: bool) {
-        self.enter(Step::Navigate);
+        self.enter(Step::RequestTrack {
+            last_fc_report: None,
+        });
         if !reuse {
             self.goal = (self.sequence as f64 / 1e9).max(self.goal.next_up());
         }
@@ -239,7 +257,12 @@ impl Flight {
                 ..Default::default()
             })?;
         }
-        if mode == Mode::Hold && reference && planner.is_some() {
+        if let Some(fc) = bus.fc.fresh()
+            && self
+                .step
+                .request_track(mode, fc.sequence, reference && planner.is_some())
+        {
+            self.sequence = nanos().max(self.sequence + 1);
             bus.command(kind::TRACK, 0., self.sequence)?;
         }
         if mode == Mode::Track && passing && planner.is_some_and(|p| p.passed == 1) {
@@ -323,21 +346,47 @@ impl Flight {
                 )?;
                 self.step = RequestLanding;
             }
-            (RequestLanding, Mode::Land) => self.step = AwaitDisarm,
-            (AwaitDisarm, Mode::Disarmed) => self.enter(Step::Ground),
-            (RequestLanding, Mode::Disarmed) => {
-                self.interrupt("disarmed before landing acknowledgement");
-            }
             _ => (),
         }
         Ok(())
     }
 
+    /// Consume the FC acknowledgement and its uninterrupted post-landing status stream.
+    fn observe_landing(&mut self, fc: FcStatusMessage) -> bool {
+        let mode = Mode::from_code(fc.mode);
+        match (&mut self.step, mode) {
+            (Step::RequestLanding | Step::AwaitDisarm, Some(Mode::Land)) => {
+                self.step = Step::AwaitDisarm;
+            }
+            (Step::RequestLanding, Some(Mode::Disarmed)) => {
+                self.interrupt("disarmed before landing acknowledgement");
+            }
+            (Step::AwaitDisarm, Some(Mode::Disarmed)) => {
+                self.enter(Step::Ground {
+                    first: fc.timestamp,
+                    last: fc,
+                });
+            }
+            (Step::Ground { first, last }, Some(Mode::Disarmed)) => {
+                if fc.sequence != last.sequence || fc.timestamp != last.timestamp {
+                    let gap = fc.timestamp - last.timestamp;
+                    if fc.sequence != last.sequence.wrapping_add(1) || gap <= 0. || gap >= 0.75 {
+                        *first = fc.timestamp;
+                    }
+                    *last = fc;
+                    if fc.timestamp - *first >= 0.75 {
+                        self.enter(Step::Complete);
+                    }
+                }
+            }
+            (Step::Ground { .. }, _) => self.interrupt("FC left DISARMED during Ground"),
+            _ => return false,
+        }
+        true
+    }
+
     pub fn tick(&mut self, bus: &mut Bus, team: u32) -> firefly_error::Result<()> {
-        use Phase::{
-            Acquire, Arm, Complete, Dwell, Ground, Hold, Hover, Interrupted, Land, Navigate,
-            Recover, Takeoff,
-        };
+        use Phase::{Acquire, Ground, Land, Recover, Takeoff};
         let phase = self.phase();
         let landing_in_progress = matches!(phase, Recover | Phase::NeedsOperator)
             && bus
@@ -351,6 +400,44 @@ impl Flight {
         if matches!(phase, Recover | Phase::NeedsOperator) {
             return self.recovery(bus);
         }
+        let dwell = self.mission.plan.hover_seconds;
+        if self.entered.elapsed() > self.step.timeout(dwell) {
+            let mode = bus.fc.fresh().and_then(|fc| Mode::from_code(fc.mode));
+            self.interrupt(&format!(
+                "{phase:?} timed out, FC {}",
+                mode.map_or("unavailable", Mode::name)
+            ));
+            return Ok(());
+        }
+        if matches!(phase, Land | Ground) {
+            let Some(fc) = bus.fc.fresh().filter(|fc| fc.timestamp.is_finite()) else {
+                self.interrupt("flight-controller telemetry stale during landing");
+                return Ok(());
+            };
+            if phase == Land
+                && fc.mode == Mode::Land.code()
+                && bus
+                    .attitude
+                    .fresh()
+                    .is_some_and(|a| a.session != self.mission.session)
+            {
+                self.interrupt("VIO session changed");
+                return Ok(());
+            }
+            if self.observe_landing(fc) {
+                return Ok(());
+            }
+        }
+        self.tick_navigation(bus, team)
+    }
+
+    fn tick_navigation(&mut self, bus: &Bus, team: u32) -> firefly_error::Result<()> {
+        use Phase::{
+            Acquire, Arm, Complete, Dwell, Ground, Hold, Hover, Interrupted, Land, Navigate,
+            Recover, Takeoff,
+        };
+        let phase = self.phase();
+        let dwell = self.mission.plan.hover_seconds;
         let Some((pose, session, mode)) = bus.navigation() else {
             self.interrupt("navigation or flight-controller telemetry stale");
             return Ok(());
@@ -361,20 +448,14 @@ impl Flight {
             Hover | Acquire | Dwell => mode == Mode::Hold,
             Navigate | Hold => matches!(mode, Mode::Hold | Mode::Track),
             Land => matches!(mode, Mode::Disarmed | Mode::Hold | Mode::Land),
-            Ground => mode == Mode::Disarmed,
             _ => false,
         };
-        let dwell = self.mission.plan.hover_seconds;
         if session != self.mission.session {
             self.interrupt("VIO session changed");
             return Ok(());
         }
         if !expected {
             self.interrupt(&format!("unexpected FC {} during {phase:?}", mode.name()));
-            return Ok(());
-        }
-        if self.entered.elapsed() > self.step.timeout(dwell) {
-            self.interrupt(&format!("{phase:?} timed out, FC {}", mode.name()));
             return Ok(());
         }
         match phase {
@@ -417,9 +498,6 @@ impl Flight {
                     self.enter(Step::RequestLanding);
                 }
             }
-            Ground if self.sustained(speed(pose) <= 0.12, pose.timestamp, 0.75) => {
-                self.enter(Step::Complete);
-            }
             Takeoff
             | Hover
             | Dwell
@@ -437,7 +515,20 @@ impl Flight {
 mod contract {
     use super::{Flight, Mode, Phase, Receipt, Step, TargetWindow, kind};
     use firefly_mission::Phase::*;
-    use firefly_pubsub::landing::LandingTargetMessage;
+    use firefly_pubsub::{fc_status::FcStatusMessage, landing::LandingTargetMessage};
+
+    #[test]
+    fn track_retries_on_fresh_hold_reports_until_acknowledged() {
+        let mut step = Step::RequestTrack {
+            last_fc_report: None,
+        };
+        assert!(!step.request_track(Mode::Hold, 7, false));
+        assert!(step.request_track(Mode::Hold, 7, true));
+        assert!(!step.request_track(Mode::Hold, 7, true));
+        assert!(step.request_track(Mode::Hold, 8, true));
+        assert!(!step.request_track(Mode::Track, 9, true));
+        assert!(!step.request_track(Mode::Hold, 10, true));
+    }
 
     fn receipt(phase: Phase) -> Receipt {
         let old = serde_json::json!({
@@ -472,6 +563,12 @@ mod contract {
         flight.enter(Step::RequestLanding);
         let mut commands = Vec::new();
         for mode in [Mode::Hold, Mode::Land, Mode::Hold, Mode::Disarmed] {
+            if flight.observe_landing(FcStatusMessage {
+                mode: mode.code(),
+                ..Default::default()
+            }) {
+                continue;
+            }
             flight
                 .handshake(mode, |cmd, seq| {
                     commands.push((cmd, seq));
@@ -485,11 +582,32 @@ mod contract {
         assert_eq!(flight.phase(), Recover);
         flight.enter(Step::RequestLanding);
         for mode in [Mode::Land, Mode::Disarmed] {
-            flight
-                .handshake(mode, |_, _| panic!("unexpected command"))
-                .unwrap();
+            assert!(flight.observe_landing(FcStatusMessage {
+                mode: mode.code(),
+                ..Default::default()
+            }));
         }
         assert_eq!(flight.phase(), Ground);
+    }
+
+    #[test]
+    fn ground_requires_contiguous_disarmed_reports_without_odometry() {
+        let mut flight = Flight::new(receipt(Land).mission);
+        flight.enter(Step::AwaitDisarm);
+        let report = |sequence, timestamp| FcStatusMessage {
+            sequence,
+            timestamp,
+            mode: Mode::Disarmed.code(),
+            ..Default::default()
+        };
+        for (seq, stamp) in [(10, 1.), (11, 1.1), (11, 1.1), (15, 1.5), (16, 2.5)] {
+            assert!(flight.observe_landing(report(seq, stamp)));
+            assert_eq!(flight.phase(), Ground);
+        }
+        for i in 1_u32..=8 {
+            assert!(flight.observe_landing(report(16 + u64::from(i), 2.5 + f64::from(i) / 10.)));
+            assert_eq!(flight.phase(), if i < 8 { Ground } else { Complete });
+        }
     }
 
     #[test]

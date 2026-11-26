@@ -206,7 +206,31 @@ impl Planner {
             velocity: Vector3::zeros(),
             acceleration: Vector3::zeros(),
         };
-        self.plan_in_swarm_init(start, goal, peers, InitSource::ColdStart, false)
+        let result = self.plan_in_swarm_init(start, goal, peers, InitSource::ColdStart, false);
+        if result
+            .as_ref()
+            .is_err_and(|e| e.kind() == ErrorKind::Convergence)
+        {
+            self.check_cancelled()?;
+            // A blocked straight seed can converge to the same collision on each
+            // restart. Try one mid-point from the grid detour with the same limits.
+            if let Ok(path) = self
+                .astar
+                .search(&self.map, start.position.coords, goal.position)
+                && path.points().len() > 2
+            {
+                let points = path.points();
+                let mid = points[points.len() / 2];
+                return self.plan_in_swarm_init(
+                    start,
+                    goal,
+                    peers,
+                    InitSource::RandomStart { mid },
+                    false,
+                );
+            }
+        }
+        result
     }
 
     /// # Errors

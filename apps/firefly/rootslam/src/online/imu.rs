@@ -1,5 +1,6 @@
 use super::{error, publish_pose_diagnostic, publish_scalar_diagnostic};
-use firefly_basalt::imu::imu_types::{ImuData, PoseVelBiasState};
+use firefly_basalt::imu::imu_types::ImuData;
+use firefly_basalt::vi_estimator::vio_estimator::TrackedPosterior;
 use firefly_error::Result;
 use firefly_imu_initialization::{
     GravityEstimate, ImuSample as GravitySample, StationaryGravitySampler,
@@ -20,7 +21,7 @@ pub(super) struct Inputs {
     pub first_image: Arc<OnceLock<i64>>,
     pub external_localization: bool,
     pub imu: mpsc::SyncSender<Option<Arc<ImuData<f64>>>>,
-    pub posteriors: mpsc::Receiver<Option<Arc<PoseVelBiasState<f64>>>>,
+    pub posteriors: mpsc::Receiver<Option<TrackedPosterior>>,
     pub gravity: mpsc::SyncSender<GravityEstimate>,
     pub frame_started: FrameStarts,
     pub watermark: ImuWatermark,
@@ -42,6 +43,7 @@ pub(super) fn run(inputs: Inputs, stop: &AtomicBool) -> Result<()> {
             delivery: ImuDelivery::BeforeFirstImage,
             sampler: Some(StationaryGravitySampler::new()),
             predictor: Predictor::new(5., Vector3::new(0., 0., -9.81)),
+            stereo_landmarks: 0,
             session: (std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -71,6 +73,7 @@ struct Adapter {
     /// Owned only while collecting gravity; successful delivery retires the sampler.
     sampler: Option<StationaryGravitySampler>,
     predictor: Predictor,
+    stereo_landmarks: u32,
     session: u64,
     alignment: firefly_base::RigidTransform,
 }
@@ -106,13 +109,14 @@ impl ImuAdapter for Adapter {
     fn posteriors(&mut self, publishers: &Publishers) -> Result<()> {
         self.flush()?;
         loop {
-            let state = match self.inputs.posteriors.try_recv() {
+            let posterior = match self.inputs.posteriors.try_recv() {
                 Ok(Some(state)) => state,
                 Ok(None) | Err(mpsc::TryRecvError::Disconnected) => {
                     return Err(error("VIO state stream ended"));
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
             };
+            let state = posterior.state;
             let pose = &state.state.pose.t_w_i;
             let stamp_ns = state.state.pose.t_ns;
             let received = firefly_basalt::utils::time_utils::profile_clock_ns();
@@ -140,6 +144,9 @@ impl ImuAdapter for Adapter {
                     accel: state.bias_accel,
                 },
             );
+            if accepted {
+                self.stereo_landmarks = posterior.stereo_landmarks;
+            }
             if let Some(viz) = publishers.viz() {
                 if let Some(started) = started {
                     publish_scalar_diagnostic(
@@ -263,6 +270,7 @@ impl ImuAdapter for Adapter {
                     as f64
                     * 1e-9,
                 session: self.session,
+                stereo_landmarks: self.stereo_landmarks,
                 quat_xyzw: [q.i, q.j, q.k, q.w],
                 angular_velocity: prediction.angular_velocity.into(),
                 gyro_bias: self.predictor.bias().gyro.into(),

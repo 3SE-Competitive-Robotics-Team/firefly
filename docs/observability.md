@@ -63,20 +63,20 @@ This catalog covers all production topic constants; test topics use isolated nam
 | `Firefly/Log` | Rust applications, sim, flight scripts → mimir | Sequence and producer loss count checked |
 | `Firefly/GroundTruth` | sim → render, mimir, tools | Pose and trajectory; independent scoring samples |
 | `Firefly/CameraRig` | Render → Mimir on the host | One retained 288-byte snapshot per Render start. Left, right and down each carry resolution, pixel-center intrinsics and the body←RDF transform. Late subscribers receive the current rig. Offline Render uses `Firefly/Offline/CameraRig` alongside its offline images. Mimir stores one static baseline per camera per segment and rejects changes during a recording. |
-| `Firefly/VioPrediction` | VIO → Mimir, directly or via HIL | With VIO diagnostics enabled, at most 50 samples per measurement second. Each 136-byte sample carries the measured pose and velocity, plus angular velocity and posterior age when attitude is available. One publisher, 16 receive slots, sequence checked. HIL v13 carries 129 payload bytes per sample. |
+| `Firefly/VioPrediction` | VIO → Mimir, directly or via HIL | With VIO diagnostics enabled, at most 50 samples per measurement second. Each 136-byte sample carries the measured pose and velocity, plus angular velocity and posterior age when attitude is available. One publisher, 16 receive slots, sequence checked. HIL v15 carries 129 payload bytes per sample. |
 | `Firefly/CorrectedOdometry` | VIO/localization → mimir, tools | Map-frame pose and trajectory |
-| `Firefly/VioAttitude` | VIO prediction → FC, mimir | Bias summary; control consumers remain independent |
+| `Firefly/VioAttitude` | VIO prediction → FC, mimir | V2 includes the count of previously mapped landmarks seen in both stereo cameras at the accepted posterior. 112 bytes in IPC, 108 bytes of HIL v15 payload. Uses the existing prediction rate and queues. |
 | `Firefly/CameraLeft`, `Firefly/CameraRight` | render/camera → VIO, depth, mimir | HIL depth pairs both eyes at the same capture timestamp. The mono backend consumes the left eye. Recordings store lossless grayscale samples when images are enabled. |
 | `Firefly/Activity` | Task → landing; HIL priority downlink | 32-byte owner/sequence inference lease, 5 Hz per owner, 8 receive slots and up to 8 owners/publishers; local arrival expiry ≤2s. LANDING requests inference; release/expiry suspends inference work. Phase requests are retained in `logs/flight`; actual resources in `landing/runtime`. Camera acquisition, publication and HIL image transport run continuously. |
 | `Firefly/CameraDown` | render/camera → landing, mimir; OV2640 CIF 352×288, sensor id 3 | Latest-value 101400-byte grayscale input; lossless samples when images are enabled |
-| `Firefly/LandingTarget` | landing → simulation pilot, daemon, mimir, HIL uplink; odom-frame body contact position | Latest-value 64-byte message; capture time, VIO session, team and validity; recorded as `landing/target` and `landing/quality` |
+| `Firefly/LandingTarget` | landing → pilot, daemon, Mimir and HIL | Latest-value 136-byte V2 message (132-byte HIL payload). The existing odom contact target and validity use capture time, session and team. Independently flagged raw metric H pose carries body-frame translation, xyzw rotation modulo a half-turn about marker Z, and pixel residual. |
 | `Firefly/CameraPair` | render → image consumers | Pair notification; image topics carry the recording |
 | `Firefly/Depth` | depth → planner-owned EGO mapper | Latest 320×240 float32 axial metres in the left camera frame, with its capture timestamp. HIL runs ZipDepth and stereo anchor correction on board. Zero denotes missing depth. Offline dataset labels use a separate namespace. |
 | `Firefly/Imu` | Matrix pilot or sim → RootSLAM, simulation controllers | Optional replay observations use the registered `vio/input/*` diagnostic gate |
 | `Firefly/Odometry` | VIO → control, planning, flight scripts and Mimir | Mimir samples initialized local odometry at up to 10 Hz on the measurement clock for `vio/odom` and its display trail |
 | `Firefly/Navigation` | VIO/localization → optional consumers, mimir | Atomic map←odom relation; mimir records changes only and uses bounded startup matching, with poses supplied by their existing observation streams |
 | `Firefly/Reference` | traj → simulation pilot, flight scripts | Flight scripts observe reference goal identity |
-| `Firefly/Sticks` | Stick source → Orange Pi pilot over local IPC, or simulation pilot → Mac fc via IPC/HIL | 16 bytes, queue depth 2, up to 50 Hz over USB. Four primary channels in µs. On hardware, the timestamp is in seconds on the Orange Pi monotonic clock. HIL v13 carries the same 16 bytes, little-endian. Commands expire after 100 ms. |
+| `Firefly/Sticks` | Stick source → Orange Pi pilot over local IPC, or simulation pilot → Mac fc via IPC/HIL | 16 bytes, queue depth 2, up to 50 Hz over USB. Four primary channels in µs. On hardware, the timestamp is in seconds on the Orange Pi monotonic clock. HIL v15 carries the same 16 bytes, little-endian. Commands expire after 100 ms. |
 | `Firefly/Control` | Mac fc → simulated plant | Motor evidence and FC summaries |
 | `Firefly/PlantState`, `Firefly/Airframe` | sim/airframe → FC, system consumers | Optional physical-state evidence; VIO uses camera and IMU observations |
 | `Firefly/Command` | daemon, ffctl, HIL relay → simulation pilot | Three publisher slots. The simulation pilot consumes the latest request, the HIL bridge buffers up to eight. Results and rejection reasons in event logs. |
@@ -116,7 +116,9 @@ of subsequent business events. Known loss makes the recording fail.
 | `rootslam/*` | Stereo enqueue-to-posterior and IMU publishing timing |
 | `vio/odom`, `vio/traj`, `vio/map/{pose,traj}`, `vio/gyro_bias` | Local and map poses at measurement time, derived trajectories and IMU bias summary; original frames are retained |
 | `fc/debug/precision` | FC at its existing diagnostic cadence: 0 ordinary mode, 1 Align, 2 Descend, 3 Final, 4 Reacquire; one scalar; always recorded |
+| `fc/debug/landing_contact` | Ordinary LAND only, up to 10 Hz, one four-scalar message per sample. Source (0 unavailable, 1 binocular odometry, 2 short inertial estimate), horizontal speed in m/s (−1 when unavailable), IMU support gate and low collective gate. `fc/debug/altitude` and `fc/debug/vertical_ned` carry the vertical state used in control. |
 | `landing/target`, `landing/quality` | Native landing observations, at most 10 Hz by default, four scalars per row; always recorded. Position xyz metres + valid; session/team/reprojection pixels/confidence. Session identity remains exact in the native u64 message; scalar session is display-only. |
+| `landing/h_pose_body` | One eight-scalar row per valid raw visual pose (translation in metres, xyzw, RMS pixels), at the active detector cadence, 10 Hz by default, up to 30 Hz. Uses the same landing sample and USB queue. Missing pose produces no row. Both H headings separated by 180° represent the measurement. |
 | `logs/landing` with `RUST_LOG=landing::gates=debug` | Optional per-inference corner/plane/position gate counts or missing capture-time odometry; at most configured 30 Hz, one bounded TextLog per inference, off by default |
 | `landing/runtime` | Always-on lifecycle evidence: active (0/1), cumulative inferences, inference requested (0/1), NPU (0/1); at most 1 Hz plus transitions, four scalars per row. Dormant releases the model/session, down subscription and odometry worker; inference count stays constant. Timestamp follows the latest VIO attitude, including during cruise. |
 | `landing/vision` | Optional `landing.toml diagnostics=true`: detections/valid/reprojection pixels/processing milliseconds, four scalars per inference, at most the configured 30 Hz; disabled by default |
@@ -138,7 +140,7 @@ of subsequent business events. Known loss makes the recording fail.
 | `planner/fsm_timing_ms` | Per execution callback: `fsm_ms` for the FSM call, `step_ms` for input/map/FSM/worker handoff/status work, and start-to-start `period_ms` |
 | `traj/sample_hz`, `traj/reference_hz` | Actual trajectory sample calls with valid odometry and successful Reference publications per wall second; zero while the corresponding work is idle |
 | `traj/timing_ms` | Per timer callback: `tick_ms` for inputs/decoding/sampling/publication, sampler `sample_ms`, local Reference IPC `publish_ms`, and start-to-start `period_ms` |
-| `logs/flight` | Mission daemon → Mimir and offline scoring. Each accepted plan emits settings, its ground anchor and up to 16 ordered waypoint declarations. The daemon emits one JSON event per phase, airborne assignment and lease transition on the odometry clock. Each TextLog uses the existing 512-byte limit and Log queue. |
+| `logs/flight` | Mission daemon → Mimir and offline scoring. Each accepted plan emits settings, its ground anchor and up to 16 ordered waypoint declarations. Ground and complete events use the FC status measurement timestamp. Other phase, airborne and lease events use the odometry measurement timestamp on the same timeline. Each TextLog uses the existing 512-byte limit and Log queue. |
 | `logs/render` | Render publishes one capture declaration per startup at simulation epoch zero, carrying the selected scene and configured downward capture rate for image scoring. |
 | `mimir/*`, `logs/*` | Configuration, queue high-water, lifecycle, failures and process events |
 | `mimir/status/{fc/tick_rate,vio/processing,vio/posterior_age,vio/landmarks,camera/publish_rate,camera/publish_latency}` | Six independent recorder-derived numeric documents from existing scalar observations; at most 2 Hz per entity in measurement time, six cached values and one constant-space publication counter on existing observations |
@@ -182,7 +184,8 @@ The existing HIL scalar path forwards these observations without additional topi
 
 The **Map** tab in the lower panel reads these four numeric entities on the depth measurement
 `sim_time`. The mapping worker publishes them directly on `Firefly/VizScalars` with standard logging
-settings. The voxel display worker opens only the voxel port. At a 32 ms frame timer and 500 ms
+settings. The voxel display worker opens only the voxel port. Each 32 ms occupancy period admits
+one paired image on the first worker poll that finds it ready. Unused capacity expires at the next period. At this rate and a 500 ms
 maintenance timer the nominal upper bound is 127 scalar rows/s (16,256 payload bytes/s), with at
 most four rows per worker update. Counts use existing buffers and disjoint slab dimensions.
 Frame update time includes maintenance performed during the same worker iteration and ends before diagnostic IPC.

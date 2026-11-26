@@ -236,11 +236,15 @@ impl ReplanFsm {
                     self.change_state(ExecState::ReplanTraj);
                 } else if let Some(local) = self.manager.local() {
                     let elapsed = (now - local.start_time).min(local.traj.duration());
+                    let remaining = local.traj.duration() - elapsed;
+                    // Finish an accepted terminal curve within its last replan interval.
+                    let finishing =
+                        self.manager.touch_goal && remaining <= self.manager.options.replan_thresh;
                     if elapsed > local.traj.duration() - 1e-2 && self.manager.touch_goal {
                         self.goal = GoalProgress::Finished;
                         report.finished = true;
                         self.change_state(ExecState::WaitTarget);
-                    } else if elapsed > self.manager.options.replan_thresh
+                    } else if (elapsed > self.manager.options.replan_thresh && !finishing)
                         || (!self.manager.touch_goal && self.manager.close_to_traj_end(elapsed))
                     {
                         self.change_state(ExecState::ReplanTraj);

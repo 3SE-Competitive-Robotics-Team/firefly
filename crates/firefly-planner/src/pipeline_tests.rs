@@ -198,7 +198,10 @@ fn coordinated_stopping_prefixes_progress_through_unknown_air_without_reversing_
             .reference
             .expect("a feasible open corridor must keep producing references");
         assert!(reference.yaw.abs() < 0.01, "{now}: {}", reference.yaw);
-        assert!(reference.velocity.x >= -1e-6, "{now}: backwards command");
+        assert!(
+            reference.velocity.x >= -1e-6,
+            "{now}: backwards command {reference:?} at {state:?}"
+        );
         if m.is_finished() {
             break;
         }
@@ -406,8 +409,10 @@ fn global_traj_time_parameterization() {
     let dur = g.traj.duration();
     let path_len = path_length(m.global_path());
     assert!(
-        (dur - path_len / 1.0).abs() < 1e-6 || (dur - path_len / (1.0 / 1.5)).abs() < 1e-6,
-        "总时长应为路径长/des_vel(0.667 或 1.0):路径 {path_len},实际 {dur}"
+        [max_vel / 1.5, max_vel / 2.25]
+            .iter()
+            .any(|v| (dur - path_len / v).abs() < 1e-6),
+        "全局轨迹时长不符合速度参数化：路径 {path_len}，速度上限 {max_vel}，实际时长 {dur}"
     );
 }
 
@@ -740,7 +745,7 @@ fn depth_timeout_keeps_upstream_collision_replanning_order() {
     m.map_mut().set_state(voxel, VoxelState::Occupied);
     m.fsm.trigger_emergency_stop_disable_failsafe();
     assert!(m.fsm.is_emergency());
-    let report = m.fsm.safety_tick(0.5, None);
+    let report = m.fsm.safety_tick(0.1, None);
     assert!(report.collision && report.replanned);
     assert_eq!(m.fsm.state(), ExecState::ExecTraj);
     m.fsm.request_emergency();
@@ -763,14 +768,14 @@ fn collision_monitor_triggers_immediate_replan() {
         !m.map().is_occupied_inflated(obstacle),
         "膨胀层刷新前新障碍不可见"
     );
-    let r = m.cycle(0.5, None);
+    let r = m.cycle(0.1, None);
     assert!(r.collision, "监控应发现前方碰撞");
     assert!(r.replanned, "发现碰撞应绕过 周期重规划阈值立即重规划");
     assert_eq!(m.replans(), 1);
     assert!(!r.emergency_stop, "重规划成功不应请求急停");
     let local = m.local().expect("碰撞重规划后应有新轨迹");
     assert!(
-        (local.start_time - 0.5).abs() < 1e-9,
+        (local.start_time - 0.1).abs() < 1e-9,
         "新轨迹从本 tick 起飞"
     );
     assert!(
@@ -783,13 +788,9 @@ fn collision_monitor_triggers_immediate_replan() {
 fn collision_monitor_ignores_already_flown_part() {
     let map = GridMapBuilder::new(0.5, [40, 24, 16]).build().unwrap();
     let planner = Planner::new(PlannerConfig::default(), map);
-    let options = ManagerOptions {
-        replan_thresh: 100.0,
-        ..ManagerOptions::default()
-    };
     let mut m = PlannerManager::with_planner(
         planner,
-        options,
+        ManagerOptions::default(),
         Vector3::new(1.0, 1.0, 1.0),
         Vector3::new(10.0, 1.0, 1.0),
     )
@@ -810,7 +811,7 @@ fn collision_monitor_ignores_already_flown_part() {
         "场景前提:身后障碍真实存在(防空洞断言)"
     );
 
-    let r = m.cycle(2.0, None);
+    let r = m.fsm.safety_tick(2.0, None);
     assert!(!r.collision, "已飞过部分的障碍不得误报");
     assert!(!r.replanned, "无误报则不应重规划");
     assert_eq!(m.replans(), 0);

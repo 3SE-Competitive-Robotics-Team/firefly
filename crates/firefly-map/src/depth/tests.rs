@@ -63,6 +63,101 @@ fn depth(raw: u16) -> DepthImage {
 }
 
 #[test]
+fn free_only_rays_respect_positive_miss_updates_and_inclusive_inflation() {
+    let point = Vector3::new(0.25, 0.25, 1.25);
+    for (p_miss, p_occ) in [(0.75, 0.6), (0.35, 0.5)] {
+        let mut map = GridMap::new(MappingParameters {
+            p_min: 0.5,
+            p_miss,
+            p_occ,
+            ..parameters()
+        })
+        .unwrap();
+        map.depth_pose_callback(depth(3000), Isometry3::translation(0.25, 0.25, 0.25))
+            .unwrap();
+        map.update_occupancy_callback(1.).unwrap();
+        let address = map.buffer_index(point).unwrap();
+        assert_eq!(map.occupancy_buffer()[address], logit(p_miss).max(0.));
+        assert!(map.inflated_occupancy_at(point) >= 32767);
+    }
+}
+
+#[test]
+fn rays_crossing_later_endpoints_keep_the_terminating_miss() {
+    use super::raycast::FrameRays;
+    let mut rays = FrameRays::new(8, true);
+    let pos = |x| Vector3::new(x, 0.5, 0.5);
+    rays.endpoint(5, pos(5.25), true);
+    rays.endpoint(3, pos(3.75), true);
+    rays.endpoint(3, pos(3.25), true);
+    rays.trace(pos(0.25), |cell| usize::try_from(cell.x).unwrap());
+    assert_eq!(rays.votes(3), (2, 2));
+    assert_eq!(rays.cell_count, 5);
+}
+
+#[test]
+#[ignore = "release-mode replay with a live reader holding the previous frame"]
+fn measured_raycast_replay() {
+    let mut map = GridMap::new(MappingParameters {
+        resolution: 0.1,
+        local_update_range: [9., 9., 5.],
+        obstacles_inflation: 0.4,
+        fx: 160.,
+        fy: 160.,
+        cx: 159.5,
+        cy: 119.5,
+        skip_pixel: 2,
+        depth_filter_margin: 2,
+        occupied_max_age: Some(1.),
+        ..parameters()
+    })
+    .unwrap();
+    let mut timings = Vec::new();
+    let mut counts = Vec::new();
+    for frame in 0..64 {
+        let stamp = f64::from(frame) / 30.;
+        let pixels: Vec<u16> = (0..320 * 240)
+            .map(|i| {
+                let x = i % 320;
+                let y = i / 320;
+                if (x + y) % 29 == 0 {
+                    0
+                } else if (x / 32 + y / 24 + frame / 8) % 3 == 0 {
+                    1800 + x * 2
+                } else {
+                    4000 + y * 20 + x * 9
+                }
+            })
+            .map(|raw| u16::try_from(raw).unwrap())
+            .collect();
+        let depth = map.sample_depth(320, 240, &pixels, |raw| raw).unwrap();
+        let pose = Isometry3::translation(-2.0 + stamp, 0.05 * f64::from(frame % 5), -0.6);
+        let reader = map.observations();
+        map.depth_pose_callback(depth, pose).unwrap();
+        let stats = map.update_at(stamp, stamp).unwrap().unwrap();
+        std::hint::black_box(reader);
+        counts.push(stats.voted_voxels);
+        if frame >= 8 {
+            timings.push(stats.raycast.as_secs_f64() * 1000.);
+        }
+    }
+    timings.sort_by(f64::total_cmp);
+    let hash = map
+        .occupancy_buffer()
+        .iter()
+        .map(|v| v.to_bits())
+        .chain(map.inflation_buffer().iter().map(|&v| u64::from(v)))
+        .chain(counts.into_iter().map(|n| n as u64))
+        .fold(0_u64, |hash, word| hash.wrapping_mul(31).wrapping_add(word));
+    println!(
+        "raycast n={} p50={:.3}ms p95={:.3}ms map={hash:016x}",
+        timings.len(),
+        timings[28],
+        timings[53]
+    );
+}
+
+#[test]
 fn returning_ray_refreshes_free_evidence_on_its_first_frame() {
     use crate::{Evidence, OnlineState};
     use std::{f64::consts::PI, time::Duration};
@@ -181,6 +276,22 @@ fn sampled_depth_matches_dense_projection_and_occupancy() {
             }
         }
     }
+}
+
+#[test]
+fn next_depth_reuses_only_a_completed_image() {
+    let grid = crate::GridMapBuilder::new(1., [4; 3]).build().unwrap();
+    let mut mapper = super::DepthMapper::new(parameters(), Isometry3::identity(), &grid).unwrap();
+    let first = mapper.sample_next_depth(3, 3, &[1000; 9], |p| p).unwrap();
+    let ptr = first.pixels.as_ptr();
+    mapper
+        .integrate(first, Isometry3::identity(), 1., 1.)
+        .unwrap();
+    let second = mapper.sample_next_depth(3, 3, &[1250; 9], |p| p).unwrap();
+    assert_eq!(ptr, second.pixels.as_ptr());
+    let pending = mapper.sample_next_depth(3, 3, &[1500; 9], |p| p).unwrap();
+    assert!(second.pixels.iter().all(|p| *p == 1250));
+    assert_ne!(ptr, pending.pixels.as_ptr());
 }
 
 #[test]
@@ -361,6 +472,38 @@ fn cloud_requires_independent_odom_and_does_not_remove_obstacles() {
     assert_eq!(map.inflated_occupancy_at(a), 32769);
     map.cloud_callback(&[]);
     assert_eq!(map.occupancy_at(a), 1);
+}
+
+#[test]
+fn overlapping_radius_four_inflation_matches_world_cells_across_ring_seams() {
+    let mut map = GridMap::new(MappingParameters {
+        local_update_range: [9.; 3],
+        obstacles_inflation: 4.,
+        ..parameters()
+    })
+    .unwrap();
+    map.odom_callback(Isometry3::identity()).unwrap();
+    let centers = [Vector3::new(-1, 0, 1), Vector3::new(3, -2, 0)];
+    map.cloud_callback(&centers.map(|p| p.cast::<f64>() + Vector3::repeat(0.25)));
+    for z in -8..9 {
+        for y in -8..9 {
+            for x in -8..9 {
+                let id = Vector3::new(x, y, z);
+                let expected: i32 = centers
+                    .iter()
+                    .map(|c| i32::from((id - c).abs().max() <= 4) + 32767 * i32::from(id == *c))
+                    .sum();
+                assert_eq!(
+                    map.inflated_occupancy_at(id.cast::<f64>() + Vector3::repeat(0.25)),
+                    expected
+                );
+            }
+        }
+    }
+    map.depth_pose_callback(depth(0), Isometry3::translation(25., 0., 0.))
+        .unwrap();
+    map.update_at(10., 10.).unwrap();
+    assert!(map.inflation_buffer().iter().all(|&count| count == 0));
 }
 
 #[test]

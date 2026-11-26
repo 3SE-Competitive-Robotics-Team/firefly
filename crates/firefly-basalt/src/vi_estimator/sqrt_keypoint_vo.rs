@@ -239,6 +239,7 @@ impl<S: BasaltScalar> SqrtKeypointVoEstimator<S> {
         self.prev_opt_flow_res
             .insert(measurement.t_ns, measurement.clone());
         let mut connected0 = 0;
+        let mut stereo_landmarks = 0;
         let mut connected = BTreeMap::new();
         let mut new_tracks = HashSet::new();
         let mut tracked = vec![Vec::new(); measurement.observations.len()];
@@ -258,6 +259,8 @@ impl<S: BasaltScalar> SqrtKeypointVoEstimator<S> {
                     tracked[camera].push(id as i32);
                     if camera == 0 {
                         connected0 += 1;
+                    } else if camera == 1 && measurement.observations[0].contains_key(&id) {
+                        stereo_landmarks += 1;
                     }
                 } else if camera == 0 {
                     new_tracks.insert(id);
@@ -391,7 +394,7 @@ impl<S: BasaltScalar> SqrtKeypointVoEstimator<S> {
                 Vector3::zeros(),
                 Vector3::zeros(),
             );
-            outputs.send_state(Arc::new(state));
+            outputs.send_state(Arc::new(state), stereo_landmarks);
         }
         if let Some(queue) = &outputs.vis {
             let mut points = Vec::new();

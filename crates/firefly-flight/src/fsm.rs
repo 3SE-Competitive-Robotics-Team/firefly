@@ -114,6 +114,14 @@ impl FlightState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub enum LandingHorizontalMotion {
+    #[default]
+    Unavailable,
+    Odometry,
+    InertialSpeed(f32),
+}
+
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Health {
@@ -128,6 +136,7 @@ pub struct Health {
     pub landing_thrust_low: bool,
     /// Fresh IMU indicates gravity support (specific force near g) and low angular rate.
     pub landing_motion_low: bool,
+    pub landing_horizontal: LandingHorizontalMotion,
 }
 
 #[derive(Deserialize, Clone, Copy, Debug)]
@@ -510,6 +519,29 @@ impl FlightFsm {
         }
     }
 
+    fn landing_contact(&self, state: &QuadState, health: Health) -> bool {
+        if let Some(precision) = self.precision {
+            return precision.contact_candidate();
+        }
+        let horizontal = match health.landing_horizontal {
+            LandingHorizontalMotion::Unavailable => return false,
+            LandingHorizontalMotion::Odometry => state.velocity.xy().norm(),
+            LandingHorizontalMotion::InertialSpeed(speed) => speed,
+        };
+        self.on_ground(state) && (0.0..=self.params.on_ground_velocity).contains(&horizontal)
+    }
+
+    /// Ordinary final descent has arrested near the surface, with independent IMU support.
+    #[must_use]
+    pub fn may_unload(&self, state: &QuadState, health: Health) -> bool {
+        self.state == FlightState::Land
+            && self.precision.is_none()
+            && !matches!(self.landing, LandingProgress::Approach)
+            && self.vertical.current_velocity() < 0.
+            && health.landing_motion_low
+            && self.landing_contact(state, health)
+    }
+
     /// 状态转移与失效保护（`update` 的决策部分；返回本次事件）。
     fn step(
         &mut self,
@@ -589,13 +621,8 @@ impl FlightFsm {
                     self.landing = LandingProgress::Crawl;
                 }
                 if !matches!(self.landing, LandingProgress::Approach)
-                    && self.precision.map_or_else(
-                        || {
-                            altitude <= self.params.on_ground_altitude
-                                && state.velocity.norm() <= self.params.on_ground_velocity
-                        },
-                        |p| p.contact_candidate() && health.landing_motion_low,
-                    )
+                    && self.landing_contact(state, health)
+                    && health.landing_motion_low
                     && health.landing_thrust_low
                 {
                     let elapsed = match self.landing {
@@ -910,6 +937,7 @@ mod tests {
             attitude_session_ok: true,
             landing_thrust_low: true,
             landing_motion_low: true,
+            landing_horizontal: LandingHorizontalMotion::Odometry,
         }
     }
 
@@ -1124,6 +1152,74 @@ mod tests {
         assert_eq!(rig.fsm.state(), FlightState::Land);
         rig.ticks(2000);
         assert_eq!(rig.fsm.state(), FlightState::Disarmed, "落地后应自动上锁");
+    }
+
+    #[test]
+    fn ordinary_land_restarts_confirmation_after_each_contact_veto() {
+        let mut rig = Rig::new();
+        rig.cmd(Command::Arm).unwrap();
+        rig.cmd(Command::Land).unwrap();
+        let grounded = Health {
+            landing_horizontal: LandingHorizontalMotion::InertialSpeed(0.05),
+            ..ok_health()
+        };
+        rig.state.velocity.x = 0.20;
+        for (z, vz, health) in [
+            (0.02, 0., ok_health()), // visually supported lateral slide
+            (
+                0.02,
+                0.,
+                Health {
+                    landing_horizontal: LandingHorizontalMotion::InertialSpeed(0.2),
+                    ..grounded
+                },
+            ),
+            (
+                0.02,
+                0.,
+                Health {
+                    landing_horizontal: LandingHorizontalMotion::Unavailable,
+                    ..grounded
+                },
+            ),
+            (
+                0.02,
+                0.,
+                Health {
+                    landing_motion_low: false,
+                    ..grounded
+                },
+            ),
+            (
+                0.02,
+                0.,
+                Health {
+                    landing_thrust_low: false,
+                    ..grounded
+                },
+            ),
+            (0.14, 0., grounded),
+            (0.02, -0.20, grounded),
+            (0.02, 0.20, grounded),
+        ] {
+            for _ in 0..120 {
+                rig.fsm.update(DT, &rig.state, None, grounded);
+            }
+            rig.state.position.z = z;
+            rig.state.velocity.z = vz;
+            rig.fsm.update(DT, &rig.state, None, health);
+            assert_eq!(rig.fsm.state(), FlightState::Land);
+            rig.state.position.z = 0.02;
+            rig.state.velocity.z = 0.;
+        }
+        for _ in 0..199 {
+            rig.fsm.update(DT, &rig.state, None, grounded);
+        }
+        assert_eq!(rig.fsm.state(), FlightState::Land);
+        for _ in 0..2 {
+            rig.fsm.update(DT, &rig.state, None, grounded);
+        }
+        assert_eq!(rig.fsm.state(), FlightState::Disarmed);
     }
 
     #[test]

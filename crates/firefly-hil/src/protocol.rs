@@ -28,7 +28,7 @@ use firefly_pubsub::viz::{
 
 pub const MAGIC: [u8; 4] = *b"FHL1";
 /// 当前协议版本；接收端拒绝版本不一致的帧，主机与板端同步部署。
-pub const VERSION: u16 = 13;
+pub const VERSION: u16 = 15;
 pub const HEADER_LEN: usize = 48;
 /// Maximum serialized JSON request or reply, excluding its 8-byte correlation ID.
 pub const MISSION_BODY_MAX: usize = 8192;
@@ -579,6 +579,7 @@ impl Message {
                 for value in message.gyro_bias {
                     put_f64(&mut out, value);
                 }
+                put_u32(&mut out, message.stereo_landmarks);
             }
             Self::Command(message) => {
                 put_f64(&mut out, message.timestamp);
@@ -721,6 +722,10 @@ impl Message {
                 put_f64(&mut out, message.confidence);
                 put_u32(&mut out, message.team);
                 put_u32(&mut out, message.valid);
+                put_u32(&mut out, message.h_pose_valid);
+                put_f64s(&mut out, &message.body_from_h_translation);
+                put_f64s(&mut out, &message.body_from_h_xyzw);
+                put_f64(&mut out, message.h_pose_reprojection_px);
             }
             Self::Scalar(message) => {
                 put_u32(&mut out, message.kind);
@@ -945,6 +950,7 @@ impl Message {
                     quat_xyzw,
                     angular_velocity,
                     gyro_bias,
+                    stereo_landmarks: input.u32()?,
                 })
             }
             Kind::Command => {
@@ -1106,10 +1112,15 @@ impl Message {
                 let confidence = input.f64()?;
                 let team = input.u32()?;
                 let valid = input.u32()?;
-                if team > 1 || valid > 1 {
+                let h_pose_valid = input.u32()?;
+                if team > 1 || valid > 1 || h_pose_valid > 1 {
                     return Err(invalid("landing target flags"));
                 }
                 Self::LandingTarget(LandingTargetMessage {
+                    h_pose_valid,
+                    body_from_h_translation: input.f64s()?,
+                    body_from_h_xyzw: input.f64s()?,
+                    h_pose_reprojection_px: input.f64()?,
                     timestamp,
                     session,
                     position,
@@ -1442,6 +1453,10 @@ mod visualization_tests {
     #[test]
     fn landing_target_roundtrip_keeps_session_quality_and_position() {
         roundtrip(&Message::LandingTarget(LandingTargetMessage {
+            h_pose_valid: 1,
+            body_from_h_translation: [0.2, -0.1, -0.9],
+            body_from_h_xyzw: [0., 0., 0.6, 0.8],
+            h_pose_reprojection_px: 0.4,
             timestamp: 8.,
             session: 42,
             position: [0.1, -0.2, 0.3],

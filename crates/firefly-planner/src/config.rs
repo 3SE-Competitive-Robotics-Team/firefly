@@ -1,6 +1,6 @@
 //! 规划器配置（论文 Table S6 参数）。
 //!
-//! 默认值取仿真场景 A–D；实飞场景（E–H）安全距离更小、速度更低。
+//! 优化参数基于仿真场景 A–D，速度上限采用 Firefly 任务配置。
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -22,6 +22,7 @@ pub struct PlannerConfig {
     /// 初始规划无需等待；≥1 必须收齐 `0..drone_id` 全部前序机轨迹才允许起飞
     /// （官方 `SEQUENTIAL_START` 态语义）。
     pub drone_id: i32,
+    /// 三维轨迹速度模长上限（m/s）。
     pub max_velocity: f64,
     pub max_acceleration: f64,
     pub max_jerk: f64,
@@ -54,7 +55,7 @@ impl Default for PlannerConfig {
             weight_obstacle_soft: 5000.0,
             swarm_clearance: 0.5,
             drone_id: 0,
-            max_velocity: 1.5,
+            max_velocity: 3.0,
             max_acceleration: 6.0,
             max_jerk: 10.0,
             weight_smoothness: 1.0,

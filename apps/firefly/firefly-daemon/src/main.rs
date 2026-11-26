@@ -232,10 +232,14 @@ impl Daemon {
             );
         }
         if before != (f.phase(), f.mission.waypoint) {
-            self.journal.submit(
-                f.receipt(),
-                Commit::PhaseChanged(self.bus.odom.last_stamp()),
-            )?;
+            let stamp = if matches!(f.phase(), Phase::Ground | Phase::Complete) {
+                self.bus.fc.fresh().map(|fc| fc.timestamp)
+            } else {
+                None
+            }
+            .unwrap_or_else(|| self.bus.odom.last_stamp());
+            self.journal
+                .submit(f.receipt(), Commit::PhaseChanged(stamp))?;
         }
         if f.phase().terminal() {
             self.bus.lease(false)?;

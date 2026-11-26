@@ -20,6 +20,32 @@ pub(crate) struct Buffer<T> {
 }
 
 impl<T: Copy> Buffer<T> {
+    /// Update selected cells page by page, detaching each shared page once.
+    #[cfg(feature = "depth")]
+    pub(crate) fn fill_masked(&mut self, mask: &[u64], value: T) {
+        assert_eq!(mask.len(), self.len.div_ceil(64));
+        let pages = Arc::make_mut(&mut self.pages);
+        for (page, words) in pages.iter_mut().zip(mask.chunks(PAGE_LEN / 64)) {
+            if words.iter().all(|&bits| bits == 0) {
+                continue;
+            }
+            let page = Arc::make_mut(page);
+            page.uniform = None;
+            let (groups, _) = page.data.as_chunks_mut::<64>();
+            for (cells, &bits) in groups.iter_mut().zip(words) {
+                if bits == u64::MAX {
+                    cells.fill(value);
+                } else {
+                    let mut selected = bits;
+                    while selected != 0 {
+                        cells[selected.trailing_zeros() as usize] = value;
+                        selected &= selected - 1;
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn new(value: T, len: usize) -> Self {
         let page = Arc::new(Page {
             data: [value; PAGE_LEN],
@@ -72,6 +98,23 @@ impl<T: Copy> Buffer<T> {
 }
 
 impl<T: Copy + PartialEq> Buffer<T> {
+    #[cfg(feature = "depth")]
+    pub(crate) fn fill_range(&mut self, mut start: usize, end: usize, value: T) {
+        while start < end {
+            let offset = start % PAGE_LEN;
+            let len = (end - start).min(PAGE_LEN - offset);
+            let page = &self.pages[start / PAGE_LEN];
+            if page.uniform != Some(value)
+                && page.data[offset..offset + len].iter().any(|&v| v != value)
+            {
+                let page = Arc::make_mut(&mut Arc::make_mut(&mut self.pages)[start / PAGE_LEN]);
+                page.data[offset..offset + len].fill(value);
+                page.uniform = (len == PAGE_LEN).then_some(value);
+            }
+            start += len;
+        }
+    }
+
     pub(crate) fn is_known_uniform(&self, value: T) -> bool {
         self.pages.iter().all(|page| page.uniform == Some(value))
     }
@@ -108,6 +151,25 @@ impl<T: Copy> IndexMut<usize> for Buffer<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "depth")]
+    #[test]
+    fn masked_updates_preserve_snapshot_and_untouched_pages() {
+        let len = 2 * PAGE_LEN + 5;
+        let mut buffer = Buffer::new(3, len);
+        let old = buffer.clone();
+        let mut mask = vec![0; len.div_ceil(64)];
+        mask[0] = u64::MAX;
+        mask[PAGE_LEN / 64 - 1] = 1 << 63;
+        *mask.last_mut().unwrap() = 1 << 4;
+        buffer.fill_masked(&mask, 7);
+        assert!(Arc::ptr_eq(&buffer.pages[1], &old.pages[1]));
+        for i in 0..len {
+            assert_eq!(old[i], 3);
+            let selected = i < 64 || i == PAGE_LEN - 1 || i == len - 1;
+            assert_eq!(buffer[i], if selected { 7 } else { 3 });
+        }
+    }
 
     #[test]
     fn moving_an_empty_window_does_not_detach_voxel_pages() {

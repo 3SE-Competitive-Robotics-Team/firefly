@@ -155,6 +155,7 @@ impl DepthImage {
         height: usize,
         source: &[T],
         sampling: DepthSampling,
+        mut pixels: Vec<u16>,
         mut convert: impl FnMut(T) -> u16,
     ) -> Result<Self> {
         if width == 0 || height == 0 || width.checked_mul(height) != Some(source.len()) {
@@ -162,7 +163,7 @@ impl DepthImage {
         }
         let columns = sampling.axis(width).len();
         let rows = sampling.axis(height);
-        let mut pixels = vec![0; columns * rows.len()];
+        pixels.resize(columns * rows.len(), 0);
         if columns > 0 {
             for (v, output) in rows.zip(pixels.chunks_exact_mut(columns)) {
                 let start = v * width + sampling.margin;

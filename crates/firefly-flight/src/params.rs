@@ -217,7 +217,6 @@ impl Default for PositionParams {
             vel_p: [1.8, 1.8, 4.0],
             vel_i: [0.4, 0.4, 2.0],
             vel_d: [0.2, 0.2, 0.0],
-            // 产品任务包线 1.5 m/s，留一倍余量。
             vel_max_horizontal: 3.0,
             vel_max_up: 3.0,
             vel_max_down: 1.5,

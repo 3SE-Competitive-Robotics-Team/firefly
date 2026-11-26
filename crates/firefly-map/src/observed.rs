@@ -1,6 +1,7 @@
 //! Time-stamped ray evidence, shared by the fusion writer and immutable map readers.
 use crate::{VoxelBox, grid::buffer::Buffer};
 use nalgebra::Vector3;
+use std::num::NonZeroU64;
 use std::time::Duration;
 
 /// The last measurement supporting the cell's current classification (seconds).
@@ -31,24 +32,66 @@ pub struct CellSample {
 
 /// A writer owns the ring slots. Published views detach touched pages on subsequent writes.
 #[derive(Clone, Debug)]
-pub(crate) struct EvidenceBuffer(Buffer<Evidence>);
+pub(crate) struct EvidenceBuffer(Buffer<Option<NonZeroU64>>);
+
+// Known timestamps are finite and nonnegative. One high bit stores the class;
+// the low codes preserve both signed zeros and leave None available for unknown.
+const OCCUPIED_BIT: u64 = 1 << 63;
+
+fn pack(stamp: f64, class: u64) -> NonZeroU64 {
+    debug_assert!(stamp.is_finite() && stamp >= 0.);
+    let code = if stamp.is_sign_negative() {
+        1
+    } else {
+        stamp.to_bits() + 2
+    };
+    NonZeroU64::new(class | code).expect("timestamp codes start at one")
+}
+
 impl EvidenceBuffer {
     #[must_use]
     pub(crate) fn new(cells: usize) -> Self {
-        Self(Buffer::new(Evidence::Unknown, cells))
+        Self(Buffer::new(None, cells))
     }
     pub(crate) fn set(&mut self, address: usize, evidence: Evidence) {
-        if self.0[address] != evidence {
-            self.0[address] = evidence;
+        let packed = match evidence {
+            Evidence::Unknown => None,
+            Evidence::Free(t) => Some(pack(t, 0)),
+            Evidence::Occupied(t) => Some(pack(t, OCCUPIED_BIT)),
+        };
+        if self.0[address] != packed {
+            self.0[address] = packed;
         }
+    }
+    #[cfg(feature = "depth")]
+    pub(crate) fn mark_free(&mut self, mask: &[u64], measured_at: f64) {
+        self.0.fill_masked(mask, Some(pack(measured_at, 0)));
     }
     #[must_use]
     pub(crate) fn get(&self, address: usize) -> Evidence {
-        self.0[address]
+        let Some(value) = self.0[address] else {
+            return Evidence::Unknown;
+        };
+        let code = value.get() & !OCCUPIED_BIT;
+        let stamp = if code == 1 {
+            -0.
+        } else {
+            f64::from_bits(code - 2)
+        };
+        if value.get() & OCCUPIED_BIT == 0 {
+            Evidence::Free(stamp)
+        } else {
+            Evidence::Occupied(stamp)
+        }
     }
     #[cfg(feature = "depth")]
     pub(crate) fn clear(&mut self) {
-        self.0.fill(Evidence::Unknown);
+        self.0.fill(None);
+    }
+
+    #[cfg(feature = "depth")]
+    pub(crate) fn clear_range(&mut self, start: usize, end: usize) {
+        self.0.fill_range(start, end, None);
     }
 
     /// Capture x-fastest ring data anchored on global multiples of the dimensions.
@@ -156,6 +199,23 @@ fn ring_address(global: [i64; 3], dims: [i64; 3]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_evidence_preserves_classes_and_all_timestamp_bits() {
+        let mut cells = EvidenceBuffer::new(2);
+        for stamp in [-0., 0., f64::from_bits(1), 19.125, f64::MAX] {
+            cells.set(0, Evidence::Free(stamp));
+            cells.set(1, Evidence::Occupied(stamp));
+            let (Evidence::Free(free), Evidence::Occupied(hit)) = (cells.get(0), cells.get(1))
+            else {
+                panic!("both observations must retain their class");
+            };
+            assert_eq!(free.to_bits(), stamp.to_bits());
+            assert_eq!(hit.to_bits(), stamp.to_bits());
+        }
+        cells.set(1, Evidence::Unknown);
+        assert_eq!(cells.get(1), Evidence::Unknown);
+    }
     #[test]
     fn imported_evidence_uses_world_coordinates_across_the_ring_seam() {
         let bounds = VoxelBox::centered([-2, 1, 0], [4, 3, 2]).unwrap();

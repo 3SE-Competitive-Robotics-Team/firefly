@@ -88,7 +88,7 @@ fn acceptance_preserves_optimizer_durations_and_coefficients() {
     let start = endpoint(Vector3::new(2., 2., 2.));
     let end = endpoint(Vector3::new(3., 2., 2.));
     let minco = MincoBuilder::new(SolverOrder::MinimumJerk, start, end)
-        .build(&[], &[0.8])
+        .build(&[], &[1.0 / planner.config.max_velocity])
         .unwrap();
     let original = minco.solve().unwrap();
     assert!(Planner::trajectory_max_vel(&original) > planner.config.max_velocity);

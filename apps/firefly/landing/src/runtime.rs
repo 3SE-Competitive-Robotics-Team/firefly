@@ -73,7 +73,8 @@ impl Worker {
         {
             return Err(crate::invalid("invalid down camera message"));
         }
-        if sample.timestamp <= self.last_frame {
+        if sample.timestamp <= self.last_frame || (session != 0 && sample.timestamp < session_start)
+        {
             return Ok(false);
         }
         self.last_frame = sample.timestamp;
@@ -81,7 +82,7 @@ impl Worker {
         let detections = self.model.detect(&sample.data, config.confidence)?;
         let deadline = Instant::now() + Duration::from_millis(150);
         let pose = loop {
-            if sample.timestamp < session_start || !RUNNING.load(Ordering::Relaxed) {
+            if session == 0 || !RUNNING.load(Ordering::Relaxed) {
                 break None;
             }
             let bracket = self.odometry.history().read(|history| {

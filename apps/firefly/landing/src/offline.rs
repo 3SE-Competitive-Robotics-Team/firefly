@@ -18,7 +18,7 @@ pub(crate) fn run(config: &Config, path: &Path) -> Result<()> {
         nalgebra::UnitQuaternion::new_normalize(nalgebra::Quaternion::new(q[3], q[0], q[1], q[2])),
     );
     for detection in model.detect(image.as_raw(), config.confidence)? {
-        let best = firefly_landing::geometry::corner_candidates(
+        let best = firefly_landing::geometry::outline_candidates(
             image.as_raw(),
             DOWN_WIDTH,
             DOWN_HEIGHT,
@@ -28,11 +28,14 @@ pub(crate) fn run(config: &Config, path: &Path) -> Result<()> {
         .filter_map(|corners| {
             config
                 .geometry
-                .horizontal_target(corners, &camera)
+                .horizontal_target(corners.rectangle, &camera)
                 .map(|pose| (corners, pose))
         })
         .min_by(|a, b| a.1.reprojection_px.total_cmp(&b.1.reprojection_px));
-        let corners = best.as_ref().map(|(corners, _)| *corners);
+        let corners = best.as_ref().map(|(outline, _)| outline.rectangle);
+        let visual = best
+            .as_ref()
+            .and_then(|(outline, _)| config.geometry.marker_pose(outline));
         let pose = best.map(|(_, pose)| pose);
         let translation = pose.as_ref().map(|target| {
             camera
@@ -42,6 +45,7 @@ pub(crate) fn run(config: &Config, path: &Path) -> Result<()> {
         results.push(
             serde_json::json!({"bounds":detection.bounds,"confidence":detection.confidence,
             "corners":corners,"camera_translation":translation.as_ref().map(nalgebra::Matrix::as_slice),
+            "camera_from_h_mod_pi":visual.map(|v| serde_json::json!({"translation_m":v.camera_from_h.translation.vector.as_slice(),"xyzw":v.camera_from_h.rotation.coords.as_slice(),"reprojection_px":v.reprojection_px})),
             "reprojection_px":pose.map(|target|target.reprojection_px)}),
         );
     }

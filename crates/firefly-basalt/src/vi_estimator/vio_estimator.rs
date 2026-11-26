@@ -57,23 +57,32 @@ pub struct VioWorkerInputs {
     pub vision: Receiver<Option<Arc<OpticalFlowResult>>>,
     pub imu: Receiver<Option<Arc<ImuData<f64>>>>,
 }
+pub struct TrackedPosterior {
+    pub state: Arc<PoseVelBiasState<f64>>,
+    /// Previously mapped landmarks observed in both stereo images of this posterior.
+    pub stereo_landmarks: u32,
+}
+
 #[derive(Clone, Default)]
 pub struct VioWorkerOutputs {
     pub diagnostics: Option<Sender<VioFrameDiagnostics>>,
     pub local_map: Option<Sender<Option<Arc<super::local_map::LocalMapSnapshot>>>>,
     pub state: Option<Sender<Option<Arc<PoseVelBiasState<f64>>>>>,
-    pub state_bounded: Option<SyncSender<Option<Arc<PoseVelBiasState<f64>>>>>,
+    pub state_bounded: Option<SyncSender<Option<TrackedPosterior>>>,
     pub marg: Option<Sender<Option<Arc<MargData>>>>,
     pub marg_bounded: Option<SyncSender<Option<Arc<MargData>>>>,
     pub vis: Option<Sender<Option<Arc<VioVisualizationData>>>>,
 }
 impl VioWorkerOutputs {
-    pub(crate) fn send_state(&self, state: Arc<PoseVelBiasState<f64>>) {
+    pub(crate) fn send_state(&self, state: Arc<PoseVelBiasState<f64>>, stereo_landmarks: u32) {
         if let Some(queue) = &self.state {
             let _ = queue.send(Some(Arc::clone(&state)));
         }
         if let Some(queue) = &self.state_bounded {
-            let _ = queue.send(Some(state));
+            let _ = queue.send(Some(TrackedPosterior {
+                state,
+                stereo_landmarks,
+            }));
         }
     }
     #[must_use]

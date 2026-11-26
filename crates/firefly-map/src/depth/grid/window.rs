@@ -1,5 +1,5 @@
 use super::{GridMap, Index, OBSTACLE_FLAG};
-use crate::{Evidence, VoxelBox};
+use crate::VoxelBox;
 use nalgebra::Vector3;
 
 impl GridMap {
@@ -69,22 +69,33 @@ impl GridMap {
         cleared
     }
     fn clear_region(&mut self, region: VoxelBox) -> usize {
-        let low = region.low();
-        let end = region.end();
-        for z in low[2]..end[2] {
-            for y in low[1]..end[1] {
-                for x in low[0]..end[0] {
-                    let id = Index::new(x as i32, y as i32, z as i32);
-                    let a = self.address(id);
-                    self.occupancy[a] = self.clamp_min_log;
-                    self.evidence.set(a, Evidence::Unknown);
-                    if self.inflate[self.inf_address(id)] >= OBSTACLE_FLAG {
-                        self.change_inf_buf(false, id);
+        let low = Index::from(
+            region
+                .low()
+                .map(|v| i32::try_from(v).expect("validated mapper window")),
+        );
+        let dims = Index::from(
+            region
+                .dimensions()
+                .map(|v| i32::try_from(v).expect("region fits window")),
+        );
+        for z in low.z..low.z + dims.z {
+            for y in low.y..low.y + dims.y {
+                let id = Index::new(low.x, y, z);
+                for (_, at, len) in ring_row(id, self.size, dims.x) {
+                    self.occupancy[at..at + len].fill(self.clamp_min_log);
+                    self.evidence.clear_range(at, at + len);
+                }
+                for (offset, at, len) in ring_row(id, self.inf_size, dims.x) {
+                    for i in 0..len {
+                        if self.inflate[at + i] >= OBSTACLE_FLAG {
+                            self.change_inf_buf(false, id + Index::x() * (offset + i as i32));
+                        }
                     }
                 }
             }
         }
-        (0..3).map(|i| (end[i] - low[i]) as usize).product()
+        dims.product() as usize
     }
     pub(super) fn closest_point_in_map(&self, point: Vector3<f64>) -> Vector3<f64> {
         let bounds = self.window.expect("ray integration initializes the window");
@@ -107,4 +118,15 @@ impl GridMap {
         self.camera_position
             + direction * (t - (self.parameters.resolution * 1e-6 / direction.amax())).max(0.)
     }
+}
+
+/// Physical spans of an x-fastest ring row and their offsets from the world-space start.
+fn ring_row(id: Index, size: Index, width: i32) -> [(i32, usize, usize); 2] {
+    let p = id.zip_map(&size, i32::rem_euclid);
+    let row = (p.z * size.y + p.y) * size.x;
+    let first = width.min(size.x - p.x);
+    [
+        (0, (row + p.x) as usize, first as usize),
+        (first, row as usize, (width - first) as usize),
+    ]
 }

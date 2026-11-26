@@ -331,6 +331,7 @@ fn takeoff_and_land_with_altitude_bias(altitude_bias: f32) {
         attitude_session_ok: true,
         landing_thrust_low: true,
         landing_motion_low: true,
+        landing_horizontal: firefly_flight::LandingHorizontalMotion::Odometry,
     };
     fsm.update(DT, &state, None, health);
     fsm.command(Command::Arm, health, &state).unwrap();
@@ -414,8 +415,29 @@ fn landing_thrust_gate_requires_valid_low_output() {
             .unwrap();
     }
     assert!(ctrl.landing_thrust_low());
+    let supported = 0.8 * ctrl.hover_thrust;
+    let mut previous = supported;
+    assert!(
+        ctrl.unload_collective(f32::NAN, Some(previous), DT)
+            .is_nan()
+    );
+    for _ in 0..1000 {
+        let next = ctrl.unload_collective(supported, Some(previous), DT);
+        assert!(next <= previous && previous - next <= 0.5 * ctrl.hover_thrust * DT + 1e-6);
+        previous = next;
+    }
+    assert!(ctrl.low_collective(previous));
+    assert!(previous > 0.);
+    assert_eq!(
+        ctrl.unload_collective(ctrl.hover_thrust, Some(previous), DT),
+        ctrl.hover_thrust
+    );
     ctrl.input_invalid = true;
     assert!(!ctrl.landing_thrust_low());
+    assert_eq!(
+        ctrl.unload_collective(supported, Some(previous), DT),
+        supported
+    );
 }
 
 #[test]

@@ -7,7 +7,7 @@ pub const ATTITUDE_TOPIC: &str = "Firefly/VioAttitude";
 /// `timestamp` 是预测的 IMU 时刻，`posterior_time` 是其 VIO 后验起点。
 #[repr(C)]
 #[derive(Debug, Clone, Copy, ZeroCopySend)]
-#[type_name("FireflyVioAttitude")]
+#[type_name("FireflyVioAttitudeV2")]
 pub struct AttitudeMessage {
     pub timestamp: f64,
     pub posterior_time: f64,
@@ -15,6 +15,8 @@ pub struct AttitudeMessage {
     pub quat_xyzw: [f64; 4],
     pub angular_velocity: [f64; 3],
     pub gyro_bias: [f64; 3],
+    /// Previously mapped landmarks matched in both cameras at `posterior_time`.
+    pub stereo_landmarks: u32,
 }
 
 #[cfg(test)]
@@ -22,7 +24,8 @@ mod tests {
     #[test]
     fn attitude_has_fixed_interprocess_layout() {
         use super::AttitudeMessage;
-        assert_eq!(std::mem::size_of::<AttitudeMessage>(), 104);
+        assert_eq!(std::mem::size_of::<AttitudeMessage>(), 112);
+        assert_eq!(std::mem::offset_of!(AttitudeMessage, stereo_landmarks), 104);
         assert_eq!(std::mem::offset_of!(AttitudeMessage, quat_xyzw), 24);
     }
 }

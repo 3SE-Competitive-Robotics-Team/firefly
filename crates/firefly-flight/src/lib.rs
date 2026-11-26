@@ -16,7 +16,10 @@ pub mod sticks;
 
 pub use airframe::{Airframe, Rotor};
 pub use control::PositionSetpoint;
-pub use fsm::{Command, Event, FlightFsm, FlightState, FsmParams, Health, Output, Reject};
+pub use fsm::{
+    Command, Event, FlightFsm, FlightState, FsmParams, Health, LandingHorizontalMotion, Output,
+    Reject,
+};
 pub use multirotor::controller::Controller;
 pub use params::{ControlParams, QuadParams};
 pub use safety::{ArmingCheck, FailsafeAction, FailsafeFlags};

@@ -1180,6 +1180,7 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
         }
         self.prev_opt_flow_res.insert(flow.t_ns, Arc::clone(flow));
         let mut connected0 = 0;
+        let mut stereo_landmarks = 0;
         let mut connected = BTreeMap::<i64, i32>::new();
         let mut unconnected = BTreeSet::new();
         for (camera, observations) in flow.observations.iter().enumerate() {
@@ -1202,6 +1203,8 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
                     *connected.entry(host.frame_id).or_default() += 1;
                     if camera == 0 {
                         connected0 += 1;
+                    } else if camera == 1 && flow.observations[0].contains_key(&id) {
+                        stereo_landmarks += 1;
                     }
                 } else if camera == 0 {
                     unconnected.insert(id);
@@ -1326,7 +1329,10 @@ impl<S: BasaltScalar> SqrtKeypointVioEstimator<S> {
         self.optimize_and_marg(&connected, &lost, outputs)?;
         let publish_begin = profile_clock_ns();
         if outputs.state.is_some() || outputs.state_bounded.is_some() {
-            outputs.send_state(Arc::new(self.latest_state().cast::<f64>()));
+            outputs.send_state(
+                Arc::new(self.latest_state().cast::<f64>()),
+                stereo_landmarks,
+            );
         }
         profile_stage(flow.t_ns, "state_send", publish_begin);
         if let Some(queue) = &outputs.vis {

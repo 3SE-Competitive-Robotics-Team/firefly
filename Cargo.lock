@@ -5555,6 +5555,7 @@ dependencies = [
  "firefly-config",
  "firefly-error",
  "firefly-landing",
+ "firefly-mission",
  "firefly-observability",
  "firefly-odometry",
  "firefly-pubsub",

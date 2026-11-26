@@ -54,9 +54,29 @@ impl Controller {
     /// Check collective thrust against the configured minimum-to-hover range.
     #[must_use]
     pub fn low_collective(&self, thrust: f32) -> bool {
+        self.airframe_signature.is_some()
+            && !self.input_invalid
+            && thrust <= self.contact_collective()
+    }
+
+    fn contact_collective(&self) -> f32 {
         let minimum = self.params.position.thrust_min;
-        let threshold = minimum + 0.3 * (self.hover_thrust - minimum);
-        self.airframe_signature.is_some() && !self.input_invalid && thrust <= threshold
+        minimum + 0.3 * (self.hover_thrust - minimum)
+    }
+
+    /// Once the position loop already requests at least 15% below hover, transfer
+    /// load to the surface at up to half the hover collective per second.
+    #[must_use]
+    pub fn unload_collective(&self, demand: f32, previous: Option<f32>, dt: f32) -> f32 {
+        if !demand.is_finite()
+            || self.airframe_signature.is_none()
+            || self.input_invalid
+            || demand > 0.85 * self.hover_thrust
+        {
+            return demand;
+        }
+        let last = previous.unwrap_or(demand);
+        demand.min((last - 0.5 * self.hover_thrust * dt).max(self.contact_collective()))
     }
 
     #[must_use]

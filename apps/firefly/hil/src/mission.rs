@@ -4,8 +4,26 @@ use firefly_mission::{Request, read_frame, write_frame};
 use std::fs::{File, Permissions};
 use std::io;
 use std::os::unix::{fs::PermissionsExt, net::UnixListener};
-use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+fn enqueue(
+    requests: &SyncSender<Message>,
+    mut request: Message,
+    deadline: Instant,
+) -> Result<(), &'static str> {
+    loop {
+        match requests.try_send(request) {
+            Ok(()) => return Ok(()),
+            Err(TrySendError::Full(pending)) => request = pending,
+            Err(TrySendError::Disconnected(_)) => return Err("HIL link closed"),
+        }
+        std::thread::sleep(Duration::from_millis(1));
+        if Instant::now() >= deadline {
+            return Err("HIL mission enqueue timed out");
+        }
+    }
+}
 
 pub fn serve(requests: SyncSender<Message>, replies: Receiver<(u64, Vec<u8>)>) -> io::Result<()> {
     let dir = firefly_mission::runtime_dir();
@@ -48,10 +66,8 @@ pub fn serve(requests: SyncSender<Message>, replies: Receiver<(u64, Vec<u8>)>) -
                     return Err("oversize HIL mission request".into());
                 }
                 id = id.wrapping_add(1);
-                requests
-                    .try_send(Message::MissionRequest(id, body))
-                    .map_err(|e| e.to_string())?;
                 let deadline = Instant::now() + timeout;
+                enqueue(&requests, Message::MissionRequest(id, body), deadline)?;
                 loop {
                     let (got, body) = replies
                         .recv_timeout(deadline.saturating_duration_since(Instant::now()))
@@ -65,4 +81,38 @@ pub fn serve(requests: SyncSender<Message>, replies: Receiver<(u64, Vec<u8>)>) -
         }
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::sync_channel;
+
+    #[test]
+    fn congested_link_delivers_once_when_space_opens() {
+        let (tx, rx) = sync_channel(1);
+        tx.send(Message::MissionRequest(1, vec![])).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        std::thread::scope(|scope| {
+            let pending =
+                scope.spawn(|| enqueue(&tx, Message::MissionRequest(2, vec![3]), deadline));
+            assert!(matches!(rx.recv(), Ok(Message::MissionRequest(1, _))));
+            assert_eq!(pending.join().unwrap(), Ok(()));
+            assert!(matches!(rx.try_recv(), Ok(Message::MissionRequest(2, body)) if body == [3]));
+            assert!(rx.try_recv().is_err());
+        });
+    }
+
+    #[test]
+    fn full_queue_expires_and_closed_queue_fails_immediately() {
+        let (tx, rx) = sync_channel(1);
+        tx.send(Message::MissionRequest(1, vec![])).unwrap();
+        let result = enqueue(&tx, Message::MissionRequest(2, vec![]), Instant::now());
+        assert_eq!(result, Err("HIL mission enqueue timed out"));
+        assert!(matches!(rx.try_recv(), Ok(Message::MissionRequest(1, _))));
+        assert!(rx.try_recv().is_err());
+        drop(rx);
+        let result = enqueue(&tx, Message::MissionRequest(3, vec![]), Instant::now());
+        assert_eq!(result, Err("HIL link closed"));
+    }
 }

@@ -82,7 +82,11 @@ odom_from_field_xyzw = [0.0, 0.0, 0.0, 1.0]"#
         ))
         .expect("shipped configs/planner.toml must parse");
         assert!((cfg.config.obstacle_clearance - 0.4).abs() < 1e-12);
-        assert!((cfg.config.max_velocity - 1.5).abs() < 1e-12);
+        assert_eq!(cfg.config.max_velocity, 3.0);
+        assert_eq!(
+            cfg.config.max_velocity,
+            PlannerToml::default().config.max_velocity
+        );
         assert!((cfg.config.weight_obstacle - 10_000.0).abs() < 1e-9);
         assert_eq!(cfg.config.virtual_ground, Some(-0.505));
         assert_eq!(cfg.config.virtual_ceiling, Some(2.195));

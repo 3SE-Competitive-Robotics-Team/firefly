@@ -134,10 +134,11 @@ pub(crate) fn executable(
 }
 
 fn angular_feasible(yaw: &Trajectory) -> bool {
-    let n = (yaw.duration() / 0.01).ceil() as usize;
+    let duration = yaw.duration();
+    let n = (duration / 0.01).ceil() as usize;
     n <= 20_000
         && (0..=n).all(|i| {
-            let state = yaw.eval((i as f64 * 0.01).min(yaw.duration()));
+            let state = yaw.eval((i as f64 * 0.01).min(duration));
             state.position.x.is_finite()
                 && state.velocity.x.abs() <= MAX_YAW_RATE + 1e-6
                 && state.acceleration.x.abs() <= MAX_YAW_ACCELERATION + 1e-6
@@ -149,8 +150,8 @@ pub(crate) fn yaw_trajectory(
     initial: Vector3<f64>,
     goal: Option<f64>,
 ) -> Option<Trajectory> {
-    let direction = look_direction(position, 0., 1.);
     let desired = goal.unwrap_or_else(|| {
+        let direction = look_direction(position, 0., 1.);
         if direction.xy().norm() > 0.1 {
             direction.y.atan2(direction.x)
         } else {
@@ -165,21 +166,29 @@ pub(crate) fn yaw_trajectory(
     };
     let end = endpoint(Vector3::new(angle, 0., 0.));
     let curve = segment(start, end, position.duration())?;
+    if position.pieces() == 1 {
+        return Some(curve);
+    }
+    // Express the same yaw quintic in local time on each position segment.
+    let mut coefficients = DMatrix::zeros(6 * position.pieces(), 3);
     let mut time = 0.;
-    let waypoints: Vec<_> = position
-        .durations()
-        .iter()
-        .take(position.pieces() - 1)
-        .map(|duration| {
-            time += duration;
-            Point3::from(curve.eval(time).position)
-        })
-        .collect();
-    MincoBuilder::new(SolverOrder::MinimumJerk, start, end)
-        .build(&waypoints, position.durations().as_slice())
-        .ok()?
-        .solve()
-        .ok()
+    for (piece, duration) in position.durations().iter().enumerate() {
+        let sample = curve.eval_piece(0, time);
+        let terms = [
+            sample.position.x,
+            sample.velocity.x,
+            sample.acceleration.x / 2.,
+            sample.jerk.x / 6.,
+            sample.snap.x / 24.,
+            curve.coefficients()[(5, 0)],
+        ];
+        coefficients
+            .column_mut(0)
+            .rows_mut(6 * piece, 6)
+            .copy_from_slice(&terms);
+        time += duration;
+    }
+    Trajectory::from_coefficients(coefficients, position.durations().clone()).ok()
 }
 
 fn brake(start: Endpoint, duration: f64) -> Option<Trajectory> {
@@ -212,7 +221,7 @@ pub(crate) fn stopping_motion(
 /// Commit a bounded prefix and complete stopping tail checked against known obstacles.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn coordinate(
-    proposed: &Trajectory,
+    proposed: Trajectory,
     map: &GridMap,
     context: &MotionContext,
     initial_yaw: Vector3<f64>,
@@ -275,7 +284,7 @@ pub(crate) fn coordinate(
         let yaw = yaw_trajectory(proposed, initial_yaw, goal_yaw)?;
         if angular_feasible(&yaw) {
             return Some(Motion {
-                position: proposed.clone(),
+                position: timed,
                 yaw,
                 reaches_goal: true,
             });
@@ -369,9 +378,10 @@ fn log_proposal(
 /// Orient the camera along the spatial lookahead beyond short braking transients.
 fn look_direction(trajectory: &Trajectory, from: f64, distance: f64) -> Vector3<f64> {
     let origin = trajectory.eval(from).position;
+    let remaining = trajectory.duration() - from;
     let mut direction = Vector3::zeros();
     for i in 1..=100 {
-        let t = from + (trajectory.duration() - from) * f64::from(i) / 100.;
+        let t = from + remaining * f64::from(i) / 100.;
         direction = trajectory.eval(t).position - origin;
         if direction.xy().norm() >= distance {
             break;
@@ -383,15 +393,15 @@ fn look_direction(trajectory: &Trajectory, from: f64, distance: f64) -> Vector3<
 /// Soft optimization penalties may exceed the envelope slightly. Refit shared
 /// MINCO knots with longer times while preserving boundary PVA, then collision-check
 /// the resulting curve.
-fn retime(proposed: &Trajectory, config: &PlannerConfig) -> Option<Trajectory> {
-    if !proposed.duration().is_finite()
-        || proposed.duration() <= 0.
-        || proposed.coefficients().iter().any(|x| !x.is_finite())
+fn retime(mut trajectory: Trajectory, config: &PlannerConfig) -> Option<Trajectory> {
+    if !trajectory.duration().is_finite()
+        || trajectory.duration() <= 0.
+        || trajectory.coefficients().iter().any(|x| !x.is_finite())
     {
         return None;
     }
-    let first = proposed.eval(0.);
-    let last = proposed.eval(proposed.duration());
+    let first = trajectory.eval(0.);
+    let last = trajectory.eval(trajectory.duration());
     let start = Endpoint {
         position: first.position,
         velocity: first.velocity,
@@ -403,16 +413,15 @@ fn retime(proposed: &Trajectory, config: &PlannerConfig) -> Option<Trajectory> {
         acceleration: last.acceleration,
     };
     let mut time = 0.;
-    let waypoints: Vec<_> = proposed
+    let waypoints: Vec<_> = trajectory
         .durations()
         .iter()
-        .take(proposed.pieces() - 1)
+        .take(trajectory.pieces() - 1)
         .map(|duration| {
             time += duration;
-            Point3::from(proposed.eval(time).position)
+            Point3::from(trajectory.eval(time).position)
         })
         .collect();
-    let mut trajectory = proposed.clone();
     for _ in 0..8 {
         if !trajectory.duration().is_finite()
             || trajectory.coefficients().iter().any(|x| !x.is_finite())
@@ -488,7 +497,7 @@ mod tests {
         let proposed =
             segment(endpoint(Vector3::new(0.5, 1., 0.989)), endpoint(target), 4.).unwrap();
         let motion = coordinate(
-            &proposed,
+            proposed,
             &map,
             &context,
             Vector3::zeros(),
@@ -502,11 +511,11 @@ mod tests {
         assert!((motion.position.eval(motion.position.duration()).position - target).norm() < 1e-9);
         // Unknown may be traversed, but a measured obstacle must still block the curve.
         map.set_state(
-            map.index_of(proposed.eval(2.).position).unwrap(),
+            map.index_of(motion.position.eval(2.).position).unwrap(),
             firefly_map::VoxelState::Occupied,
         );
         map.inflate_obstacles();
-        assert!(!executable(&map, &proposed, 0., &config));
+        assert!(!executable(&map, &motion.position, 0., &config));
     }
 
     #[test]
@@ -524,7 +533,7 @@ mod tests {
         let proposed = proposal();
         assert!(!executable(&map, &proposed, 0., &config));
         let motion = coordinate(
-            &proposed,
+            proposed,
             &map,
             &context,
             Vector3::zeros(),
@@ -560,7 +569,7 @@ mod tests {
         context.measured_yaw = std::f64::consts::PI;
         let initial = Vector3::new(context.measured_yaw, 0., 0.);
         let motion = coordinate(
-            &proposal(),
+            proposal(),
             &map,
             &context,
             initial,
@@ -611,7 +620,7 @@ mod tests {
         let pose = endpoint(Vector3::new(0.5, 1., 1.));
         let position = segment(pose, pose, 2.).unwrap();
         let motion = coordinate(
-            &position,
+            position,
             &map,
             &context,
             Vector3::zeros(),
@@ -639,8 +648,9 @@ mod tests {
         let end = endpoint(Vector3::new(3., 1., 1.));
         let original = segment(start, end, 1.).unwrap();
         let config = PlannerConfig::default();
-        let timed = retime(&original, &config).unwrap();
-        assert!(timed.duration() > original.duration());
+        let original_duration = original.duration();
+        let timed = retime(original, &config).unwrap();
+        assert!(timed.duration() > original_duration);
         let first = timed.eval(0.);
         assert!((first.velocity - start.velocity).norm() < 1e-9);
         assert!((first.acceleration - start.acceleration).norm() < 1e-9);
@@ -663,13 +673,18 @@ mod tests {
         )
         .unwrap();
         let yaw = yaw_trajectory(&position, Vector3::new(0., 1., 0.), Some(1.5)).unwrap();
+        assert_eq!(yaw.durations(), position.durations());
         for i in 0..=200 {
             let t = f64::from(i) * 0.01;
             // Independent quintic with yaw(0)=0, rate(0)=1, yaw(2)=1.5,
             // zero endpoint accelerations and zero final rate.
             let expected = t + 0.375 * t.powi(3) - 0.40625 * t.powi(4) + 0.09375 * t.powi(5);
-            assert!((yaw.eval(t).position.x - expected).abs() < 1e-9);
-            assert!(yaw.eval(t).velocity.x >= -1e-9);
+            let sample = yaw.eval(t);
+            let rate = 1. + 1.125 * t.powi(2) - 1.625 * t.powi(3) + 0.46875 * t.powi(4);
+            let acceleration = 2.25 * t - 4.875 * t.powi(2) + 1.875 * t.powi(3);
+            assert!((sample.position.x - expected).abs() < 1e-9);
+            assert!((sample.velocity.x - rate).abs() < 1e-9);
+            assert!((sample.acceleration.x - acceleration).abs() < 1e-9);
         }
     }
 
@@ -679,7 +694,7 @@ mod tests {
         let target = Vector3::new(1.05, 1., 1.);
         let position = segment(endpoint(Vector3::new(1., 1., 1.)), endpoint(target), 2.).unwrap();
         let motion = coordinate(
-            &position,
+            position,
             &map,
             &context,
             Vector3::zeros(),

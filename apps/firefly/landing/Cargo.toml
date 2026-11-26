@@ -17,6 +17,7 @@ firefly-base.workspace = true
 firefly-config.workspace = true
 firefly-error.workspace = true
 firefly-landing.workspace = true
+firefly-mission.workspace = true
 firefly-observability.workspace = true
 firefly-pubsub.workspace = true
 firefly-odometry.workspace = true
