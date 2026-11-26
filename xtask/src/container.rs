@@ -7,7 +7,7 @@ use std::process::Command;
 
 /// Rust 1.100.0 + Debian trixie。升级镜像必须同时更新 digest。
 pub const IMAGE: &str =
-    "rust:1.100.0-trixie@sha256:e19840879045c951c905d0eaa9887f3439c62000e429963371b376bac8d38c31";
+    "rust:1.100.0-trixie@sha256:e84068000361bf3d4a5ba2b7647f62893528b1eb9f847d7a23b493f5ce8ea254";
 const TOOLCHAIN: &str = "1.100.0";
 /// Apple container 默认只给约 1GB，release 并行编译会被 OOM kill。
 const MEMORY: &str = "8G";

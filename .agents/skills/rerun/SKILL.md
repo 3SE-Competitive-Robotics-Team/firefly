@@ -44,7 +44,7 @@ description: Rerun 基础认知与 .rrd 录制文件的阅读方法。当需要�
 - **CLI**：`rerun rrd print`（`-v` 到 `-vvv` 逐级展开，`--entity` 过滤，`--footers` 看索引）、`rerun rrd stats`（`--no-decode` 快速版）、`verify / migrate / optimize / split / merge / filter / compare`
 - **Python**：`rerun.chunk.RrdReader(path)` → `.recordings()/.blueprints()`（StoreEntry: kind/application_id/recording_id）→ `.stream()/.store()`（索引访问）；`Chunk.format()` 直接打表
 - **Chunk Processing API**：`LazyChunkStream` + lenses（MutateLens/DeriveLens/Selector jq 语法）；`write_rrd(application_id, recording_id)` 写文件，存储/查询场景用 `OptimizationProfile.OBJECT_STORE`
-- **Viewer MCP**：`rerun viewer-mcp` 起 MCP server 控制 viewer（含截图）
+- **Viewer MCP**：在仓库根目录运行 `uv run rerun mcp`，可连接 Viewer 并截图。
 - 坑：查询组件列是 `ListArray`，DataFrame 0-based 索引 vs SQL 1-based
 
 ## 7. 示例：读取 odom 与 GT 原始数据（本项目）

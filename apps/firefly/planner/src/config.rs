@@ -44,21 +44,12 @@ mod tests {
     use firefly_planner::manager::DEFAULT_REPLAN_THRESH;
 
     #[test]
-    fn registered_field_loads_only_the_configured_asset_at_its_surveyed_pose() {
-        use sha2::{Digest, Sha256};
-        let path = "apps/firefly/planner/tests/fixtures/registered-field.ffmap";
-        let digest = format!(
-            "{:x}",
-            Sha256::digest(include_bytes!("../tests/fixtures/registered-field.ffmap"))
-        );
-        let toml = format!(
-            r#"[mapping.field]
-path = "{path}"
-sha256 = "{digest}"
+    fn loads_field_map_at_its_surveyed_pose() {
+        let toml = r#"[mapping.field]
+path = "apps/firefly/planner/tests/fixtures/registered-field.ffmap"
 odom_from_field_translation = [-8.0, 0.0, 0.0]
-odom_from_field_xyzw = [0.0, 0.0, 0.0, 1.0]"#
-        );
-        let mut config: PlannerToml = toml::from_str(&toml).unwrap();
+odom_from_field_xyzw = [0.0, 0.0, 0.0, 1.0]"#;
+        let config: PlannerToml = toml::from_str(toml).unwrap();
         let map = config.mapping.build(0.).unwrap();
         assert!(
             map.cell_at(
@@ -69,8 +60,6 @@ odom_from_field_xyzw = [0.0, 0.0, 0.0, 1.0]"#
             .unwrap()
             .fixed_occupied
         );
-        config.mapping.field.as_mut().unwrap().sha256.clear();
-        assert!(config.mapping.build(0.).is_err());
     }
 
     /// 随仓库发布的配置文件必须可解析且为完整部署值。
@@ -130,12 +119,11 @@ pub struct MappingOptions {
     pub field: Option<RegisteredField>,
 }
 
-/// Surveyed for the current odometry session. Both pose and asset identity are explicit.
+/// Field map path and its surveyed pose in the current odometry session.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RegisteredField {
     pub path: std::path::PathBuf,
-    pub sha256: String,
     pub odom_from_field_translation: [f64; 3],
     pub odom_from_field_xyzw: [f64; 4],
 }
@@ -294,7 +282,6 @@ impl MappingOptions {
             .build()?;
         map.move_ring_buffer(nalgebra::Vector3::zeros());
         if let Some(field) = &self.field {
-            use sha2::{Digest, Sha256};
             let transform = firefly_base::RigidTransform::from_parts(
                 firefly_base::FrameId::ODOM,
                 firefly_base::FrameId::MAP,
@@ -302,17 +289,7 @@ impl MappingOptions {
                 field.odom_from_field_xyzw,
             )?;
             let path = firefly_config::paths::root().join(&field.path);
-            let asset = std::fs::read_to_string(&path)
-                .map_err(|e| Error::from(e).with_operation("load registered field"))?;
-            if !format!("{:x}", Sha256::digest(asset.as_bytes()))
-                .eq_ignore_ascii_case(&field.sha256)
-            {
-                return Err(Error::new(
-                    ErrorKind::InvalidArgument,
-                    "registered field SHA-256 mismatch",
-                ));
-            }
-            let file: firefly_map::MapFile = asset.parse()?;
+            let file = firefly_map::MapFile::from_file(path)?;
             file.install_fixed(&mut map, transform.isometry())?;
         }
         Ok(map)

@@ -15,7 +15,7 @@ firefly-error.workspace = true
 firefly-viplite.workspace = true
 
 [build-dependencies]
-cc = "1"
+cc = "1.11.3"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
