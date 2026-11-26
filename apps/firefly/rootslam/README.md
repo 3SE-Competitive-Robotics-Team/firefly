@@ -243,8 +243,9 @@ An explicit `vio.vio_config` archive selects its own tracking settings. The
 frame-to-frame tracker accepts `config.optical_flow_rematch_stereo` for this
 matching policy. Archives that omit it use Basalt's temporal right-eye tracking.
 Optional sparse mapping maintains its own posterior map; planner owns dense depth
-fusion. `--external-localization` assigns corrected-odometry and navigation
-publication to the localization process. The online data flow is shown in
+fusion. Set `external_localization = true` under `[vio]` in the RootSLAM
+configuration to assign corrected-odometry and navigation publication to the
+localization process. The online data flow is shown in
 [architecture](https://3se-competitive-robotics-team.github.io/firefly/architecture/).
 
 ```bash

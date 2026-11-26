@@ -48,10 +48,10 @@ cargo xtask hil configs/mission/square.toml
 
 ```bash
 uv run python scripts/export_takeoff_replay.py logs/runs/log_0161 1.3 7 logs/algorithm-perf/pad-launch-1
-cargo run --release -p landing -- --config configs/landing.toml --takeoff-replay logs/algorithm-perf/pad-launch-1/frames.json
+cargo run --release -p landing -- --takeoff-replay logs/algorithm-perf/pad-launch-1/frames.json
 ```
 
-同一个目录可复制到 Orange Pi，用板端 `landing --config configs/landing.toml --takeoff-replay <目录>/frames.json` 回放。每行 JSON 输出一帧的时间、H 坪坐标系下的机体位置（米）、状态和首次接管候选的坐标变换。坐标原点是停机坪中心处的触地机体原点，竖直轴向上，水平朝向取自独立 IMU。H 高度使用已标定的 H 尺寸、相机内外参和独立姿态。归档中的该姿态约 1 Hz，适于评估平缓直升。
+同一个目录可复制到 Orange Pi，用板端 `landing --takeoff-replay <目录>/frames.json` 回放。每行 JSON 输出一帧的时间、H 坪坐标系下的机体位置（米）、状态和首次接管候选的坐标变换。坐标原点是停机坪中心处的触地机体原点，竖直轴向上，水平朝向取自独立 IMU。H 高度使用已标定的 H 尺寸、相机内外参和独立姿态。归档中的该姿态约 1 Hz，适于评估平缓直升。
 
 任务进入 TAKEOFF 后，须收到本阶段起点之后、年龄至多 0.25 秒的飞控 TAKEOFF 回报；此后 TAKEOFF 和 HOLD 均可维持窗口。连续三帧确认 H。H 高度进入 0.9～1.1 米、VIO 后验年龄在 150 ms 内、至少 8 个双目匹配和 6 个地标、估计速度至多 0.25 m/s 时开始比较。窗口开始时固定 VIO 到局部水平系的变换和 H 在 VIO 系中的位姿。连续 0.5 秒内，位置差须在 6 cm 内，完整三维旋转差须在 5° 内，按 H 的半周对称性比较。纯视觉法向与独立重力夹角超过 25° 时暂停交接。JSON 分别给出原始视觉和重力辅助的机体 ← H 变换；其中平移是机体系米数，旋转是 xyzw 四元数。当前飞行控制仍执行普通起飞。
 
@@ -202,6 +202,8 @@ Rust 应用和跨 crate 的业务接口用 `firefly_error::Result<T>` 传播失�
 调用方读取任务回执或评分 JSON 时，沿用已发布的字段和退出码。只在生成协议响应、评分报告或日志时将错误转成文本。对协议的回归测试应从实际命令读取 stdout、stderr 和退出码。
 
 ## Rust 命令行
+
+`camera`、`motor`、`traj`、`mimir`、`landing`、`localization` 和 `hil` 的配置文件位于安装目录的 `configs/<进程名>.toml`。`ffctl process supervise` 读取当前生效的 `configs/processes.toml`。切换到 HIL 时，板端 gadget 将 HIL 清单安装到这个路径。
 
 所有 Rust 应用、`xtask`、示例和自定义基准程序都用 `usage-rs` 解析命令行参数。在所属 crate 的 `[dependencies]` 中写入 `usage-rs.workspace = true`。如果只有示例或基准程序需要解析参数，将这行放在 `[dev-dependencies]`。
 

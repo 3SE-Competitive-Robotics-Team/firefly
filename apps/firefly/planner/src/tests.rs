@@ -8,12 +8,12 @@ use firefly_pubsub::viz::VOXELS_MAX;
 fn cli_coordinates_require_three_values_and_accept_negative_numbers() {
     use std::ffi::OsStr;
 
-    let args = ["--start", "-1", "0", "2", "--goal", "3", "-4", "5"].map(OsStr::new);
+    let args = ["--goal", "3", "-4", "5"].map(OsStr::new);
     let parsed = Arguments::parse_from(&args).unwrap();
-    assert_eq!(parsed.start.as_deref(), Some([-1., 0., 2.].as_slice()));
     assert_eq!(parsed.goal.as_deref(), Some([3., -4., 5.].as_slice()));
     for invalid in [
-        &["--start", "1", "2"][..],
+        &["--start", "1", "2", "3"][..],
+        &["--goal", "1", "2"],
         &["--goal", "1", "2", "3", "4"],
         &["--goal", "1", "nan?", "3"],
     ] {
@@ -83,7 +83,6 @@ fn local_depth_source_reaches_planner_without_an_occupancy_publisher() {
             },
         },
         ManagerOptions::default(),
-        [0.; 3],
         None,
     )
     .unwrap();
@@ -229,7 +228,6 @@ fn safety_callback_applies_new_obstacles_and_deletions_without_exec_tick() {
             ..Default::default()
         },
         ManagerOptions::default(),
-        [0.; 3],
         None,
     )
     .unwrap();

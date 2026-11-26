@@ -1,11 +1,4 @@
-use std::path::PathBuf;
-
 use serde::Deserialize;
-
-/// `configs/hil.toml` 缺省路径。
-pub fn default_config() -> PathBuf {
-    firefly_config::paths::config("hil.toml")
-}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

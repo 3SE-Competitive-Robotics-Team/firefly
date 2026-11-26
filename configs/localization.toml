@@ -1,5 +1,5 @@
 # 可选外部位姿融合 ESKF；启动时必须显式填写 [origin]。
-# RootSLAM 使用 --external-localization 后由本进程独占导航发布。
+# 在 RootSLAM 配置的 [vio] 下设置 external_localization = true 后，由本进程独占导航发布。
 
 [fusion.visual]
 max_innovation_trans = 20.0 # m，VINS-Fusion 特征验证后的门限

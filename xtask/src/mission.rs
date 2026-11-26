@@ -207,11 +207,14 @@ fn launch_stack(
     seed: u64,
 ) -> io::Result<()> {
     let navigates = plans.iter().any(|plan| !plan.waypoints.is_empty());
-    let scene = if navigates { "sim-mission" } else { "sim" };
-    let sim = format!(
-        "from firefly_sim.main import cli; raise SystemExit(cli(['--no-trace','--config','configs/{scene}.toml'], publish_plant_state=False, seed={seed}))"
+    let entry = format!(
+        "from firefly_sim.main import cli; raise SystemExit(cli(publish_plant_state=False, seed={seed}))"
     );
-    stack.launch(program(python, &["-c", &sim]))?;
+    let mut sim = program(python, &["-c", &entry, "--no-trace"]);
+    if navigates {
+        sim.args(["--config", "configs/sim-mission.toml"]);
+    }
+    stack.launch(sim)?;
     stack.launch(program(release.join("render"), &[]))?;
     stack.launch(program(
         release.join("fc"),
@@ -224,10 +227,7 @@ fn launch_stack(
     if hil {
         stack.launch(program(release.join("hil"), &[]))?;
     } else {
-        let mut vio = program(
-            release.join("firefly-rootslam"),
-            &["--no-loop-closures", "--no-mapping"],
-        );
+        let mut vio = program(release.join("firefly-rootslam"), &[]);
         vio.env("RAYON_NUM_THREADS", "4");
         stack.launch(vio)?;
         stack.launch(program(release.join("pilot"), &["--simulation"]))?;
@@ -241,12 +241,11 @@ fn launch_stack(
                 .iter()
                 .flat_map(|p| &p.waypoints)
                 .any(|w| w.offset[2] > 2.0);
-            let config = if high {
-                "configs/planner-cuboid-sil.toml"
-            } else {
-                "configs/planner.toml"
-            };
-            stack.launch(program(release.join("planner"), &["--config", config]))?;
+            let mut planner = program(release.join("planner"), &[]);
+            if high {
+                planner.args(["--config", "configs/planner-cuboid-sil.toml"]);
+            }
+            stack.launch(planner)?;
         }
         stack.launch(program(prefix.join("bin/firefly-daemon"), &[]))?;
     }

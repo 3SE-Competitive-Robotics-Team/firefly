@@ -8,11 +8,8 @@ mod hil;
 #[derive(usage_rs::Cli)]
 #[usage(bin = "motor")]
 struct Arguments {
-    /// 电机驱动配置文件
-    #[usage(long)]
-    config: Option<std::path::PathBuf>,
     /// 使用板端 HIL 接口
-    #[usage(long, conflicts = "--config")]
+    #[usage(long)]
     hil: bool,
 }
 
@@ -31,8 +28,5 @@ fn run_app() -> firefly_error::Result<()> {
             "HIL 接口需要 Linux",
         ));
     }
-    let config = args
-        .config
-        .unwrap_or_else(|| firefly_config::paths::config("motor.toml"));
-    actuator::run(&config)
+    actuator::run(&firefly_config::paths::config("motor.toml"))
 }

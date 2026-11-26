@@ -57,9 +57,6 @@ struct Arguments {
     /// 应用配置文件
     #[usage(long)]
     config: Option<PathBuf>,
-    /// 初始位置（米），默认位于原点
-    #[usage(long, num_args = 3, value_names = ["X", "Y", "Z"], allow_negative_numbers)]
-    start: Option<Vec<f64>>,
     /// 初始目标（米），省略时等待动态目标
     #[usage(long, num_args = 3, value_names = ["X", "Y", "Z"], allow_negative_numbers)]
     goal: Option<Vec<f64>>,
@@ -156,8 +153,7 @@ impl App {
         config: PlannerConfig,
         mapping: &config::MappingOptions,
         manager_options: ManagerOptions,
-        start: [f64; 3],
-        goal: Option<[f64; 3]>,
+        initial_goal: Option<[f64; 3]>,
     ) -> Result<Self> {
         let mut grid = mapping.build(config.obstacle_clearance)?;
         let [fx, _, cx, _] = mapping.depth.intrinsics;
@@ -172,13 +168,11 @@ impl App {
             });
         }
         let planner = firefly_planner::Planner::new(config, grid);
-        let initial_goal = goal;
-        let goal = start;
         let manager = PlannerManager::with_planner(
             planner,
             manager_options,
-            Vector3::new(start[0], start[1], start[2]),
-            Vector3::new(goal[0], goal[1], goal[2]),
+            Vector3::zeros(),
+            Vector3::zeros(),
         )?;
         let node = create_node()?;
         let log_ipc = firefly_observability::init_ipc(&node, "planner");
@@ -815,14 +809,11 @@ fn log_slow_stage(stage: &str, started: Instant) {
 
 fn main() -> std::process::ExitCode {
     let args = Arguments::parse();
-    let (Ok(start), Ok(goal)) = (
-        args.start.map(TryInto::try_into).transpose(),
-        args.goal.map(TryInto::try_into).transpose(),
-    ) else {
-        eprintln!("--start 和 --goal 各接受一组 X Y Z 坐标");
+    let Ok(goal) = args.goal.map(TryInto::try_into).transpose() else {
+        eprintln!("--goal 需要一组 X Y Z 坐标");
         return std::process::ExitCode::from(2);
     };
-    let result = run(args.config, args.mandatory_stop, start, goal);
+    let result = run(args.config, args.mandatory_stop, goal);
     firefly_observability::flush();
     result.unwrap_or_else(|e| firefly_error::report("planner", Err(e)))
 }
@@ -830,7 +821,6 @@ fn main() -> std::process::ExitCode {
 fn run(
     config: Option<PathBuf>,
     mandatory_stop: bool,
-    start: Option<[f64; 3]>,
     goal: Option<[f64; 3]>,
 ) -> Result<std::process::ExitCode> {
     if mandatory_stop {
@@ -846,13 +836,7 @@ fn run(
         init_observability,
         |_| Ok(()),
     )?;
-    let mut app = App::new(
-        cfg.config,
-        &cfg.mapping,
-        cfg.manager,
-        start.unwrap_or([0.0; 3]),
-        goal,
-    )?;
+    let mut app = App::new(cfg.config, &cfg.mapping, cfg.manager, goal)?;
     let code = firefly_error::report_with(app.run(), |error| log::error!("planner 失败：{error}"));
     firefly_observability::pump_log_ipc(&app.log_ipc);
     Ok(code)

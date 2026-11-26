@@ -14,9 +14,6 @@ static RUNNING: AtomicBool = AtomicBool::new(true);
 #[derive(usage_rs::Cli)]
 #[usage(bin = "landing")]
 struct Arguments {
-    /// 应用配置文件
-    #[usage(long)]
-    config: Option<PathBuf>,
     /// 单幅 352×288 图像的离线处理
     #[usage(long)]
     image: Option<PathBuf>,
@@ -45,10 +42,11 @@ fn main() -> std::process::ExitCode {
 
 fn run_app() -> firefly_error::Result<()> {
     let args = Arguments::parse();
-    let path = args
-        .config
-        .unwrap_or_else(|| firefly_config::paths::config("landing.toml"));
-    let mut config: Config = firefly_config::startup(path, firefly_observability::init, validate)?;
+    let mut config: Config = firefly_config::startup(
+        firefly_config::paths::config("landing.toml"),
+        firefly_observability::init,
+        validate,
+    )?;
     if let Some(path) = args.takeoff_replay {
         if args.image.is_some() {
             return Err(invalid("select one offline input"));

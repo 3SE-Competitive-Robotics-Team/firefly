@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use fastrace::prelude::*;
@@ -12,8 +11,7 @@ use firefly_localization::quality::{Quality, QualityOptions};
 use firefly_observability::init as init_observability;
 use firefly_pubsub::navigation::{NAVIGATION_TOPIC, NavigationMessage};
 use firefly_pubsub::node::create_node;
-use firefly_pubsub::odom::CORRECTED_ODOM_TOPIC;
-use firefly_pubsub::odom::OdomMessage;
+use firefly_pubsub::odom::{CORRECTED_ODOM_TOPIC, ODOM_TOPIC, OdomMessage};
 use firefly_pubsub::publish::Publisher;
 use firefly_pubsub::subscriber::Subscriber;
 use firefly_pubsub::vision::{POSE_OBS_TOPIC, PoseObservation};
@@ -24,9 +22,6 @@ use nalgebra::{Isometry3, Matrix4, Quaternion, Translation3, UnitQuaternion, Vec
 
 const LOOP_PERIOD: Duration = Duration::from_millis(10);
 const CORRECTED_COLOR: (u8, u8, u8) = (60, 200, 80);
-fn default_config() -> PathBuf {
-    firefly_config::paths::config("localization.toml")
-}
 const ODOM_FRESH_TIMEOUT: f64 = 1.0;
 const PENDING_VISUAL_CAP: usize = 8;
 const PENDING_VISUAL_TIMEOUT: f64 = 10.0;
@@ -35,14 +30,7 @@ const ODOM_HIST_CAP: usize = 1000;
 /// 发布校正后的里程计
 #[derive(usage_rs::Cli)]
 #[usage(bin = "localization")]
-struct Arguments {
-    /// 应用配置文件
-    #[usage(long)]
-    config: Option<PathBuf>,
-    /// 输入里程计 topic
-    #[usage(long)]
-    odom_topic: Option<String>,
-}
+struct Arguments {}
 
 fn interp_odom(
     hist: &std::collections::VecDeque<(f64, OdomMessage)>,
@@ -537,19 +525,13 @@ fn main() -> std::process::ExitCode {
 }
 
 fn run() -> Result<std::process::ExitCode> {
-    let args = Arguments::parse();
-    let config = args.config.unwrap_or_else(default_config);
+    Arguments::parse();
     let cfg = firefly_config::startup::<LocalizationConfig>(
-        &config,
+        firefly_config::paths::config("localization.toml"),
         init_observability,
         LocalizationConfig::validate,
     )?;
-    let mut app = App::new(
-        cfg,
-        args.odom_topic
-            .as_deref()
-            .unwrap_or(firefly_pubsub::odom::ODOM_TOPIC),
-    )?;
+    let mut app = App::new(cfg, ODOM_TOPIC)?;
     let code =
         firefly_error::report_with(app.run(), |error| log::error!("localization 失败：{error}"));
     firefly_observability::pump_log_ipc(&app.log_ipc);

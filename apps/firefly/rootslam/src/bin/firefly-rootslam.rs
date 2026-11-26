@@ -51,15 +51,6 @@ struct Arguments {
     /// Application configuration file.
     #[usage(long)]
     config: Option<PathBuf>,
-    /// Disable loop closures.
-    #[usage(long)]
-    no_loop_closures: bool,
-    /// Disable mapping.
-    #[usage(long)]
-    no_mapping: bool,
-    /// Receive external localization.
-    #[usage(long)]
-    external_localization: bool,
 }
 
 fn argument_error(message: impl Into<String>) -> Error {
@@ -72,21 +63,13 @@ fn main() -> std::process::ExitCode {
 
 fn run_app() -> firefly_error::Result<()> {
     let arguments = Arguments::parse();
-    let mut config: Config = firefly_config::startup(
+    let config = firefly_config::startup(
         arguments
             .config
             .unwrap_or_else(|| firefly_config::paths::config("firefly-rootslam.toml")),
         firefly_observability::init,
-        |config: &Config| config.vio.validate(),
+        Config::validate,
     )?;
-    if arguments.no_loop_closures {
-        config.vio.loops = false;
-    }
-    if arguments.no_mapping {
-        config.vio.map = false;
-    }
-    config.vio.external_localization |= arguments.external_localization;
-    config.validate()?;
     let model = config.input.model()?;
     config.vio.validate_model(&model)?;
     let stop = Arc::new(AtomicBool::new(false));
@@ -142,7 +125,25 @@ fn run_app() -> firefly_error::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::{Arguments, Config};
+    use std::ffi::OsStr;
+
+    #[test]
+    fn vio_options_belong_to_the_config_file() {
+        let args = ["--config", "mapping.toml"].map(OsStr::new);
+        assert_eq!(
+            Arguments::parse_from(&args).unwrap().config.as_deref(),
+            Some(std::path::Path::new("mapping.toml"))
+        );
+        assert!(Arguments::parse_from(&args[..1]).is_err());
+        for flag in [
+            "--no-mapping",
+            "--no-loop-closures",
+            "--external-localization",
+        ] {
+            assert!(Arguments::parse_from(&[OsStr::new(flag)]).is_err());
+        }
+    }
 
     #[test]
     fn precision_has_one_configuration_owner() {
@@ -164,6 +165,9 @@ mod tests {
 
     #[test]
     fn source_specific_options_cannot_be_silently_ignored() {
+        let external: Config = toml::from_str("[vio]\nexternal_localization = true").unwrap();
+        assert!(external.vio.external_localization);
+        assert!(external.validate().is_ok());
         let ipc: Config = toml::from_str("[dataset]\ntrajectory = 'poses.txt'").unwrap();
         assert!(ipc.validate().is_err());
         let mut dataset: Config = toml::from_str(include_str!(
@@ -189,9 +193,13 @@ mod tests {
             assert!(config.validate().is_ok());
         }
         let partial: Config = toml::from_str("precision = 'float32'").unwrap();
-        assert!(!partial.vio.map && !partial.vio.loops && !partial.vio.external_localization);
-        assert_eq!(partial.precision, super::Precision::Float32);
-        assert!(partial.validate().is_ok());
+        let hil: Config =
+            toml::from_str(include_str!("../../../../../configs/rootslam-hil.toml")).unwrap();
+        for config in [partial, hil] {
+            assert!(!config.vio.map && !config.vio.loops && !config.vio.external_localization);
+            assert_eq!(config.precision, super::Precision::Float32);
+            assert!(config.validate().is_ok());
+        }
         assert!(toml::from_str::<Config>("onlne = {}").is_err());
     }
 

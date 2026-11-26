@@ -13,7 +13,7 @@ autostart = true
 [[process]]
 name = "firefly-rootslam"
 # RootSLAM 只用双目 + IMU；局部深度地图由 planner 独立维护。
-command = ["taskset", "-c", "6,7", "env", "RAYON_NUM_THREADS=2", "bin/firefly-rootslam", "--no-loop-closures", "--no-mapping", "--config", "configs/rootslam-hil.toml"]
+command = ["taskset", "-c", "6,7", "env", "RAYON_NUM_THREADS=2", "bin/firefly-rootslam", "--config", "configs/rootslam-hil.toml"]
 autostart = true
 
 [[process]]
