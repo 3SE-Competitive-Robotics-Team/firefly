@@ -26,10 +26,12 @@ Matrix BMI270 固件使用单独的 `linux/amd64` 镜像。容器构建说明给
 准备 GPU 图形会话、[场地资产](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/packages/firefly-cad/README.md)和任务所需模型。从一次悬停任务开始。
 
 ```bash
-cargo xtask sil configs/mission-hover.toml
+cargo xtask sil configs/mission/hover.toml
 ```
 
-可在同一次调用中依次验收多个计划，例如 `cargo xtask sil configs/mission-square.toml configs/mission-cuboid.toml`。各架次共享一个 VIO 坐标系。每次落稳上锁后，xtask 再提交下一项任务。若已有飞行进程占用 IPC，用 `cargo xtask processes .` 查看 PID。
+可在同一次调用中依次验收多个计划，例如 `cargo xtask sil configs/mission/square.toml configs/mission/cuboid.toml`。各架次共享一个 VIO 坐标系。每次落稳上锁后，xtask 再提交下一项任务。若已有飞行进程占用 IPC，用 `cargo xtask processes .` 查看 PID。
+
+`configs/mission/` 存放任务计划。棒棒糖形水平圈使用 `circle.toml`，绕机体前后轴的竖圈使用 `vertical-circle.toml`，平面和三维李萨如分别使用 `lissajous.toml` 和 `lissajous-3d.toml`。三维李萨如的最高航点是 3.2 m，复现该 HIL 任务时，板端规划器使用试飞时的 3.7 m 高度上界。
 
 ### USB 硬件在环（HIL）
 
@@ -37,7 +39,7 @@ Mac 运行 MuJoCo、render、模拟飞控和 Mimir。Orange Pi 运行任务和�
 
 ```bash
 cargo xtask deploy-hil
-cargo xtask hil configs/mission-square.toml
+cargo xtask hil configs/mission/square.toml
 ```
 
 #### 回放 H 坪起飞观测
@@ -80,7 +82,7 @@ cargo xtask deploy --device firefly-0001
 adb -s firefly-0001 shell
 ```
 
-在 Orange Pi 上运行 `ffctl process status` 检查 `pilot` 和 `firefly-rootslam`，用 `ffctl mission status` 查询任务服务。实机尚缺任务所需的机体参数和飞控解锁状态反馈。HIL 提供这些反馈，可以用 `ffctl mission submit inspection-001 configs/mission-square.toml` 提交计划，再用 `ffctl mission status inspection-001` 查询回执。相同 ID 和计划可重试，取消用 `ffctl mission cancel inspection-001`。[任务阶段和回执](architecture.md#系统运行架次和任务)
+在 Orange Pi 上运行 `ffctl process status` 检查 `pilot` 和 `firefly-rootslam`，用 `ffctl mission status` 查询任务服务。实机尚缺任务所需的机体参数和飞控解锁状态反馈。HIL 提供这些反馈，可以用 `ffctl mission submit inspection-001 configs/mission/square.toml` 提交计划，再用 `ffctl mission status inspection-001` 查询回执。相同 ID 和计划可重试，取消用 `ffctl mission cancel inspection-001`。[任务阶段和回执](architecture.md#系统运行架次和任务)
 
 进程启用项、命令和 CPU 亲和性以[实机清单](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/configs/processes.toml)和 [HIL 清单](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/configs/processes-hil.toml)为准。装好相机后用 `ffctl process enable camera` 启用。板端需要 RRD 时手动启动 `firefly-mimir.service`，HIL 由 Mac 录制。
 
@@ -132,7 +134,7 @@ python scripts/depth_image.py models/yolo26n-depth/yolo26n-depth.ort input.jpg d
 
 将 A733 VIPLite 模型放入 `models/zipdepth/relative-320-int8.nb`。当前部署产物 SHA-256 为 `27258bda43f37516e97037fc5241d7264fe2b987ef8de6863fb0b2010d09f190`。源权重为 [ZipDepth 的 zipdepth_base_npu.pth](https://github.com/fabiotosi92/ZipDepth/tree/91f3fd21e131641f51e8d35736d1958350180e3a/checkpoints)。NBG 输入为 320×240 左右目依次存放的两个原始 UINT8 平面，图中取左目预测，输出一个同尺寸 FP32 相对视差平面。板端运行时使用 Debian trixie 的 OpenCV core、imgproc 和 video 库。
 
-HIL 清单使用 `depth --zipdepth`。左右目的 sensor ID 和采集时刻必须匹配已校正的 HIL 相机组。VIO 接收 30 Hz 双目图像，深度进程按采集时间从中选取 15 Hz 同步帧对，再提交 NPU 推理。NPU 执行时，CPU 3 从双向光流和水平极线匹配中提取锚点。全图拟合后沿左图边缘平滑局部视差残差，按 HIL 相机的焦距和基线换算成轴向米数。有效锚点不足时发布零深度，仍使用该帧采集时钟。运行 `cargo x deploy-hil`，再运行 `cargo x hil configs/mission-square.toml`。
+HIL 清单使用 `depth --zipdepth`。左右目的 sensor ID 和采集时刻必须匹配已校正的 HIL 相机组。VIO 接收 30 Hz 双目图像，深度进程按采集时间从中选取 15 Hz 同步帧对，再提交 NPU 推理。NPU 执行时，CPU 3 从双向光流和水平极线匹配中提取锚点。全图拟合后沿左图边缘平滑局部视差残差，按 HIL 相机的焦距和基线换算成轴向米数。有效锚点不足时发布零深度，仍使用该帧采集时钟。运行 `cargo x deploy-hil`，再运行 `cargo x hil configs/mission/square.toml`。
 
 ### 单目飞行链路的 320 深度模型
 

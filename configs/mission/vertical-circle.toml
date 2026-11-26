@@ -1,0 +1,18 @@
+# Fly along odom +X to the top of the circle, then orbit in the YZ plane.
+# Center (5, 0, 1.25) and radius 0.75 m, relative to takeoff.
+altitude = 2.0
+return_offset = [0, 0]
+hover_seconds = 1
+precision_land = true
+waypoints = [
+  { offset = [5, 0, 2], arrival = "pass" },
+  { offset = [5, 0.4821, 1.8245], arrival = "pass" },
+  { offset = [5, 0.7386, 1.3802], arrival = "pass" },
+  { offset = [5, 0.6495, 0.875], arrival = "pass" },
+  { offset = [5, 0.2565, 0.5452], arrival = "pass" },
+  { offset = [5, -0.2565, 0.5452], arrival = "pass" },
+  { offset = [5, -0.6495, 0.875], arrival = "pass" },
+  { offset = [5, -0.7386, 1.3802], arrival = "pass" },
+  { offset = [5, -0.4821, 1.8245], arrival = "pass" },
+  { offset = [5, 0, 2], arrival = "stop" },
+]

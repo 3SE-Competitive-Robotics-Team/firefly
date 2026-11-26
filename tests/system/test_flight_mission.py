@@ -24,7 +24,7 @@ def test_roundtrip_reacquires_pad_and_physically_lands(route, points):
             reports.append(json.loads(line))
 
     process = ManagedProcess(
-        ["cargo", "xtask", "sil", f"configs/mission-{route}.toml"],
+        ["cargo", "xtask", "sil", f"configs/mission/{route}.toml"],
         cwd=ROOT, env={**os.environ, "RUST_LOG": "info"}, on_line=observe,
     )
     try:

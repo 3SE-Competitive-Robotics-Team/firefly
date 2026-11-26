@@ -78,28 +78,23 @@ fn package(root: &Path) -> Result<PathBuf> {
     }
 
     let config_dir = root.join("configs");
-    let mut configs = fs::read_dir(&config_dir)
-        .at_path("read", &config_dir)?
-        .map(|item| item.map(|entry| entry.path()))
-        .collect::<std::io::Result<Vec<_>>>()
-        .at_path("read", &config_dir)?;
-    configs.sort();
-    for config in configs {
-        let Some(name) = config.file_name() else {
-            continue;
-        };
-        if config
-            .extension()
-            .is_none_or(|extension| extension != "toml")
-            || !config.is_file()
-        {
-            continue;
+    for relative in ["configs", "configs/mission"] {
+        let dir = root.join(relative);
+        let mut configs = fs::read_dir(&dir)
+            .at_path("read", &dir)?
+            .collect::<std::io::Result<Vec<_>>>()
+            .at_path("read", &dir)?;
+        configs.sort_by_key(std::fs::DirEntry::file_name);
+        for config in configs {
+            let source = config.path();
+            if source.extension().is_some_and(|ext| ext == "toml") && source.is_file() {
+                entries.push(Entry {
+                    path: format!("{relative}/{}", config.file_name().to_string_lossy()),
+                    mode: 0o644,
+                    source,
+                });
+            }
         }
-        entries.push(Entry {
-            path: format!("configs/{}", name.to_string_lossy()),
-            mode: 0o644,
-            source: config,
-        });
     }
 
     for name in [
@@ -354,7 +349,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn board_package_ships_the_watchdog_and_its_service() {
+    fn board_package_ships_the_watchdog_models_and_missions() {
         let workspace = target::workspace_root();
         let target = workspace.join("target");
         fs::create_dir_all(&target).unwrap();
@@ -374,6 +369,19 @@ mod tests {
         }
         let installed = root.join("installed");
         archive::unpack(&package(root).unwrap(), &installed).unwrap();
+        let missions = installed.join("configs/mission");
+        assert!(missions.join("vertical-circle.toml").is_file());
+        for entry in fs::read_dir(workspace.join("configs/mission")).unwrap() {
+            let source = entry.unwrap();
+            if source.path().extension().is_some_and(|ext| ext == "toml") {
+                let plan = fs::read_to_string(missions.join(source.file_name())).unwrap();
+                assert_eq!(plan, fs::read_to_string(source.path()).unwrap());
+                toml::from_str::<firefly_mission::Plan>(&plan)
+                    .unwrap()
+                    .validate()
+                    .unwrap();
+            }
+        }
         assert!(installed.join("bin/hil-gadget").is_file());
         assert_eq!(
             fs::read(installed.join("models/zipdepth/LICENSE")).unwrap(),

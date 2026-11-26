@@ -1,0 +1,20 @@
+# Forward figure eight: x = 5.5 - 3 cos(t), y = 1.6 sin(2t), 0 <= t <= 2 pi.
+altitude = 1.95
+return_offset = [0, 0]
+hover_seconds = 1
+precision_land = true
+waypoints = [
+  { offset = [2.5, 0, 1.95], arrival = "pass" },
+  { offset = [2.902, 1.386, 1.95], arrival = "pass" },
+  { offset = [4, 1.386, 1.95], arrival = "pass" },
+  { offset = [5.5, 0, 1.95], arrival = "pass" },
+  { offset = [7, -1.386, 1.95], arrival = "pass" },
+  { offset = [8.098, -1.386, 1.95], arrival = "pass" },
+  { offset = [8.5, 0, 1.95], arrival = "pass" },
+  { offset = [8.098, 1.386, 1.95], arrival = "pass" },
+  { offset = [7, 1.386, 1.95], arrival = "pass" },
+  { offset = [5.5, 0, 1.95], arrival = "pass" },
+  { offset = [4, -1.386, 1.95], arrival = "pass" },
+  { offset = [2.902, -1.386, 1.95], arrival = "pass" },
+  { offset = [2.5, 0, 1.95], arrival = "stop" },
+]

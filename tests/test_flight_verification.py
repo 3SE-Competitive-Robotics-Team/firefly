@@ -225,7 +225,7 @@ def test_mission_sensor_profile_preserves_imu_and_sets_camera_budget():
 
 
 def route(shape, team="red"):
-    config = Path(__file__).resolve().parents[1] / f"configs/mission-{shape}.toml"
+    config = Path(__file__).resolve().parents[1] / f"configs/mission/{shape}.toml"
     points = tomllib.loads(config.read_text())["waypoints"]
     sign = 1 if team == "red" else -1
     return tuple((sign * p["offset"][0], sign * p["offset"][1]) for p in points)
@@ -233,7 +233,7 @@ def route(shape, team="red"):
 
 def test_cuboid_covers_twelve_edges_at_two_flight_levels():
     configs = Path(__file__).resolve().parents[1] / "configs"
-    points = tomllib.loads((configs / "mission-cuboid.toml").read_text())["waypoints"]
+    points = tomllib.loads((configs / "mission/cuboid.toml").read_text())["waypoints"]
     assert all(p["arrival"] == "stop" for p in points)
     red = np.array([p["offset"] for p in points])
     assert red[0] == pytest.approx([3., 0., 3.3])

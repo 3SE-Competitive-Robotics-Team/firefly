@@ -26,7 +26,7 @@ pub fn run(device: &str) -> Result<()> {
     wait_for_enumeration()
 }
 
-/// `deploy` 会把 `configs/*.toml` 一起发布，这里只确认 HIL 清单确实在位。
+/// 确认部署包中的 HIL 进程清单已安装。
 fn ensure_hil_processes(device: &str) -> Result<()> {
     let output = deploy::adb_output(
         device,
