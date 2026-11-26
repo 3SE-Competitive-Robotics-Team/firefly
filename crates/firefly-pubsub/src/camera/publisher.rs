@@ -65,3 +65,30 @@ image_publisher!(
     IMAGE_WIDTH,
     IMAGE_HEIGHT
 );
+
+impl DepthImagePublisher {
+    /// Fill a shared camera-sized depth image with one complete row per call.
+    /// # Errors
+    /// Propagates IPC loan and publication failures.
+    pub fn publish_rows(
+        &self,
+        timestamp: f64,
+        sensor_id: i32,
+        mut row: impl FnMut(usize) -> [f32; IMAGE_WIDTH],
+    ) -> Result<TraceContext> {
+        self.0.try_publish_with(|sample| {
+            sample.timestamp = timestamp;
+            sample.sensor_id = sensor_id;
+            for (y, dst) in sample
+                .data
+                .as_chunks_mut::<IMAGE_WIDTH>()
+                .0
+                .iter_mut()
+                .enumerate()
+            {
+                dst.write_copy_of_slice(&row(y));
+            }
+            Ok(())
+        })
+    }
+}

@@ -36,7 +36,7 @@ pilot 将飞控时间戳映射到 Orange Pi 单调时钟，加速度以 m/s²、
 flowchart LR
     imu[IMU] --> vio[RootSLAM]
     camera[camera / render] -->|双目| vio
-    camera -->|左目| depth[depth]
+    camera -->|HIL 同步双目，其他后端左目| depth[depth]
     camera -->|下视| landing[landing]
     vio -->|Odometry| landing
     vio -->|Odometry| planner[planner]

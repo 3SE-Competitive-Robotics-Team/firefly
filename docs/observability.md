@@ -35,7 +35,7 @@ Every observation change must include these steps in the same review:
 | Numeric diagnostics, enums and bit masks | Scalars plus named SeriesLines | Original measurement `sim_time`; preserve every row, including duplicate timestamps |
 | Poses, keypoints and maps | Transform3D, Points2D, VoxelGridMap | Explicit source coordinates; conversions belong to the display layer |
 | Process events | `logs/<app>` TextLog | `sim_time` if available, otherwise `wall_time` |
-| Camera images | `cameras/{left,right,down}/image` Image | Lossless grayscale at capture time; business camera subscriptions are latest-value |
+| Camera images | `cameras/{left,right,down}/image` Image | Lossless grayscale at capture time. Mono depth consumes the latest left image. HIL stereo depth uses the camera service's two-slot buffer on each eye to pair capture timestamps across short inference overruns. |
 | Keypoints | `cameras/{left,right}/points` Points2D and `track_id` | Original image timestamp, IDs and detected count retained; display coordinates add half a pixel |
 | Configuration and calibration | `mimir/config`, static camera components | Only data constant for the recording is static |
 
@@ -66,12 +66,12 @@ This catalog covers all production topic constants; test topics use isolated nam
 | `Firefly/VioPrediction` | VIO → Mimir, directly or via HIL | With VIO diagnostics enabled, at most 50 samples per measurement second. Each 136-byte sample carries the measured pose and velocity, plus angular velocity and posterior age when attitude is available. One publisher, 16 receive slots, sequence checked. HIL v13 carries 129 payload bytes per sample. |
 | `Firefly/CorrectedOdometry` | VIO/localization → mimir, tools | Map-frame pose and trajectory |
 | `Firefly/VioAttitude` | VIO prediction → FC, mimir | Bias summary; control consumers remain independent |
-| `Firefly/CameraLeft`, `Firefly/CameraRight` | render/camera → VIO, depth (left), mimir | Lossless grayscale samples when images are enabled |
+| `Firefly/CameraLeft`, `Firefly/CameraRight` | render/camera → VIO, depth, mimir | HIL depth pairs both eyes at the same capture timestamp. The mono backend consumes the left eye. Recordings store lossless grayscale samples when images are enabled. |
 | `Firefly/Activity` | Task → landing; HIL priority downlink | 32-byte owner/sequence inference lease, 5 Hz per owner, 8 receive slots and up to 8 owners/publishers; local arrival expiry ≤2s. LANDING requests inference; release/expiry suspends inference work. Phase requests are retained in `logs/flight`; actual resources in `landing/runtime`. Camera acquisition, publication and HIL image transport run continuously. |
 | `Firefly/CameraDown` | render/camera → landing, mimir; OV2640 CIF 352×288, sensor id 3 | Latest-value 101400-byte grayscale input; lossless samples when images are enabled |
 | `Firefly/LandingTarget` | landing → simulation pilot, daemon, mimir, HIL uplink; odom-frame body contact position | Latest-value 64-byte message; capture time, VIO session, team and validity; recorded as `landing/target` and `landing/quality` |
 | `Firefly/CameraPair` | render → image consumers | Pair notification; image topics carry the recording |
-| `Firefly/Depth` | YOLO depth → planner-owned EGO mapper | Latest 320×240 float32 axial metres in the left camera frame, with its capture timestamp. HIL computes on board. Offline dataset labels use a separate namespace. |
+| `Firefly/Depth` | depth → planner-owned EGO mapper | Latest 320×240 float32 axial metres in the left camera frame, with its capture timestamp. HIL runs ZipDepth and stereo anchor correction on board. Zero denotes missing depth. Offline dataset labels use a separate namespace. |
 | `Firefly/Imu` | Matrix pilot or sim → RootSLAM, simulation controllers | Optional replay observations use the registered `vio/input/*` diagnostic gate |
 | `Firefly/Odometry` | VIO → control, planning, flight scripts and Mimir | Mimir samples initialized local odometry at up to 10 Hz on the measurement clock for `vio/odom` and its display trail |
 | `Firefly/Navigation` | VIO/localization → optional consumers, mimir | Atomic map←odom relation; mimir records changes only and uses bounded startup matching, with poses supplied by their existing observation streams |

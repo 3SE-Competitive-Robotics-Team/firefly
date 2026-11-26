@@ -90,10 +90,10 @@ pub fn build(root: &Path, apps: &[&str], with_unpacker: bool) -> Result<()> {
 fn builder_tag() -> String {
     let digest = IMAGE.split_once("sha256:").map_or("", |(_, digest)| digest);
     let short = digest.get(..12).unwrap_or(digest);
-    format!("{BUILDER_IMAGE}:{TOOLCHAIN}-{short}")
+    format!("{BUILDER_IMAGE}:{TOOLCHAIN}-{short}-opencv")
 }
 
-/// 生成并（首次）构建构建镜像：基础镜像 + `libclang-dev`。
+/// 准备带有 bindgen 和双目匹配所需开发库的板端构建镜像。
 fn ensure_builder_image(cache: &Path, image: &str) -> Result<()> {
     let inspect = Command::new("container")
         .args(["image", "inspect", image])
@@ -105,10 +105,10 @@ fn ensure_builder_image(cache: &Path, image: &str) -> Result<()> {
 
     let containerfile = cache.join("Containerfile");
     let recipe = format!(
-        "FROM {IMAGE}\nRUN apt-get update && apt-get install -y --no-install-recommends libclang-dev && rm -rf /var/lib/apt/lists/*\n"
+        "FROM {IMAGE}\nRUN apt-get update && apt-get install -y --no-install-recommends libclang-dev libopencv-core-dev libopencv-imgproc-dev libopencv-video-dev && rm -rf /var/lib/apt/lists/*\n"
     );
     fs::write(&containerfile, recipe).at_path("write", &containerfile)?;
-    println!("构建板载构建镜像 {image}（首次需要下载 libclang）");
+    println!("构建板端镜像 {image}");
     let status = Command::new("container")
         .args(["build", "--arch", "arm64", "--tag", image, "--file"])
         .arg(&containerfile)

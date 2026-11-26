@@ -53,17 +53,91 @@ pub struct Network {
     _device: MutexGuard<'static, ()>,
 }
 
+#[derive(PartialEq, Eq)]
+enum ModelKind {
+    Detection,
+    MonoDepth,
+    Stereo,
+}
+
+/// Raw planar stereo input with a camera-sized FP32 relative disparity head.
+pub struct StereoNetwork(Network);
+
+impl StereoNetwork {
+    pub fn open(model: Vec<u8>, width: usize, height: usize) -> Result<Self> {
+        Network::create(model, width, height, ModelKind::Stereo).map(Self)
+    }
+
+    /// Run CPU correspondence while the device owns the input and output buffers.
+    pub fn run(
+        &mut self,
+        left: &[u8],
+        right: &[u8],
+        correspond: impl FnOnce() -> Result<()>,
+    ) -> Result<&[f32]> {
+        let net = &mut self.0;
+        let input = &net.buffers[0];
+        if left.len() != net.output.len() || right.len() != left.len() {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "Stereo image dimensions differ from NBG",
+            ));
+        }
+        // SAFETY: open validated both tensor sizes and formats. Mappings are scoped
+        // to the copies; CPU correspondence has no access to the device buffers.
+        unsafe {
+            let dst = net.api.vip_map_buffer(input.handle).cast::<u8>();
+            if dst.is_null() {
+                return Err(Error::new(ErrorKind::Io, "Map stereo input"));
+            }
+            let (l, r) = slice::from_raw_parts_mut(dst, input.elements).split_at_mut(left.len());
+            l.copy_from_slice(left);
+            r.copy_from_slice(right);
+            check("unmap stereo input", net.api.vip_unmap_buffer(input.handle))?;
+            check(
+                "flush stereo input",
+                net.api
+                    .vip_flush_buffer(input.handle, VIP_BUFFER_OPER_TYPE_FLUSH),
+            )?;
+            check(
+                "submit stereo network",
+                (net.api.vip_trigger_network)(net.network),
+            )?;
+            let matching = correspond();
+            check(
+                "wait for stereo network",
+                (net.api.vip_wait_network)(net.network),
+            )?;
+            matching?;
+            let output = net.buffers[1].handle;
+            check(
+                "invalidate relative disparity",
+                net.api
+                    .vip_flush_buffer(output, VIP_BUFFER_OPER_TYPE_INVALIDATE),
+            )?;
+            let src = net.api.vip_map_buffer(output).cast::<f32>();
+            if src.is_null() {
+                return Err(Error::new(ErrorKind::Io, "Map relative disparity"));
+            }
+            net.output
+                .copy_from_slice(slice::from_raw_parts(src, net.buffers[1].elements));
+            check("unmap relative disparity", net.api.vip_unmap_buffer(output))?;
+        }
+        Ok(&net.output)
+    }
+}
+
 impl Network {
     pub fn open(model: Vec<u8>, width: usize, height: usize) -> Result<Self> {
-        Self::create(model, width, height, false)
+        Self::create(model, width, height, ModelKind::Detection)
     }
 
     /// Compact depth networks expose a single FP16 metric head at quarter resolution.
     pub fn open_depth(model: Vec<u8>, side: usize) -> Result<Self> {
-        Self::create(model, side, side, true)
+        Self::create(model, side, side, ModelKind::MonoDepth)
     }
 
-    fn create(model: Vec<u8>, width: usize, height: usize, depth: bool) -> Result<Self> {
+    fn create(model: Vec<u8>, width: usize, height: usize, kind: ModelKind) -> Result<Self> {
         let size = u32::try_from(model.len()).map_err(|e| {
             Error::caused_by(ErrorKind::OutOfRange, "NBG exceeds the SDK size limit", e)
         })?;
@@ -100,7 +174,10 @@ impl Network {
         })?;
         for (property, expected) in [
             (VIP_NETWORK_PROP_INPUT_COUNT, 1),
-            (VIP_NETWORK_PROP_OUTPUT_COUNT, if depth { 1 } else { 2 }),
+            (
+                VIP_NETWORK_PROP_OUTPUT_COUNT,
+                if kind == ModelKind::Detection { 2 } else { 1 },
+            ),
         ] {
             let mut count = 0_u32;
             check("vip_query_network", unsafe {
@@ -117,16 +194,35 @@ impl Network {
                 ));
             }
         }
-        let input = result.bind(true, 0, false)?;
-        if input != [width, height, 3, 1] {
+        let stereo = kind == ModelKind::Stereo;
+        let input = result.bind(
+            true,
+            0,
+            if stereo {
+                VIP_BUFFER_FORMAT_UINT8
+            } else {
+                VIP_BUFFER_FORMAT_INT8
+            },
+        )?;
+        if input != [width, height, if stereo { 2 } else { 3 }, 1] {
             return Err(Error::new(
                 ErrorKind::InvalidData,
                 format!("Unexpected NBG input {input:?}"),
             ));
         }
-        if depth {
-            let dims = result.bind(false, 0, true)?;
-            if dims.get(..2) != Some(&[width / 4, height / 4]) || dims[2..].iter().any(|&d| d != 1)
+        if kind != ModelKind::Detection {
+            let dims = result.bind(
+                false,
+                0,
+                if stereo {
+                    VIP_BUFFER_FORMAT_FP32
+                } else {
+                    VIP_BUFFER_FORMAT_FP16
+                },
+            )?;
+            let divisor = if stereo { 1 } else { 4 };
+            if dims.get(..2) != Some(&[width / divisor, height / divisor])
+                || dims[2..].iter().any(|&d| d != 1)
             {
                 return Err(Error::new(
                     ErrorKind::InvalidData,
@@ -135,8 +231,8 @@ impl Network {
             }
             result.output.resize(result.buffers[1].elements, 0.);
         } else {
-            let boxes = result.bind(false, 0, false)?;
-            let scores = result.bind(false, 1, false)?;
+            let boxes = result.bind(false, 0, VIP_BUFFER_FORMAT_INT8)?;
+            let scores = result.bind(false, 1, VIP_BUFFER_FORMAT_INT8)?;
             let Some(&n) = boxes.first() else {
                 return Err(Error::new(
                     ErrorKind::InvalidData,
@@ -181,7 +277,7 @@ impl Network {
         Ok(result)
     }
 
-    fn bind(&mut self, input: bool, index: u32, fp16: bool) -> Result<Vec<usize>> {
+    fn bind(&mut self, input: bool, index: u32, format: u32) -> Result<Vec<usize>> {
         let query = if input {
             self.api.vip_query_input
         } else {
@@ -216,13 +312,11 @@ impl Network {
             VIP_BUFFER_PROP_QUANT_FORMAT,
             ptr::from_mut(&mut p.quant_format).cast(),
         )?;
-        let (scale, zero) = if fp16 {
-            if p.data_format as u32 != VIP_BUFFER_FORMAT_FP16
-                || p.quant_format as u32 != VIP_BUFFER_QUANTIZE_NONE
-            {
+        let (scale, zero) = if format != VIP_BUFFER_FORMAT_INT8 {
+            if p.data_format as u32 != format || p.quant_format as u32 != VIP_BUFFER_QUANTIZE_NONE {
                 return Err(Error::new(
                     ErrorKind::InvalidData,
-                    "Expected unquantized FP16 output",
+                    format!("Expected unquantized VIPLite format {format}"),
                 ));
             }
             (1., 0)
@@ -279,7 +373,12 @@ impl Network {
             zero,
         });
         let available = unsafe { self.api.vip_get_buffer_size(handle) } as usize;
-        if elements == 0 || elements > available / if fp16 { 2 } else { 1 } {
+        let bytes_per_element = match format {
+            VIP_BUFFER_FORMAT_FP32 => 4,
+            VIP_BUFFER_FORMAT_FP16 => 2,
+            _ => 1,
+        };
+        if elements == 0 || elements > available / bytes_per_element {
             return Err(Error::new(
                 ErrorKind::InvalidData,
                 "Invalid VIPLite buffer size",

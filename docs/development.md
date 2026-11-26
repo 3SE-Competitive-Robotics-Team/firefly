@@ -55,7 +55,7 @@ SIL 和 HIL 都在录制结束后逐架次评分。要重新评分，向 `target
 
 ### 板上任务服务
 
-用 `adb devices` 核对 Orange Pi 的设备号。在仓库的 `models/` 下备齐精降的 `h-marker.nb`、`viplite.json` 和深度模型 `yolo26n-depth-320-int8.nb` 后部署。部署会停止服务，更新 `/opt/firefly` 的程序、配置和模型，再启动服务。[打包文件清单](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/xtask/src/deploy.rs) · [板端模型准备](#板端模型)
+用 `adb devices` 核对 Orange Pi 的设备号。在仓库的 `models/` 下备齐精降的 `h-marker.nb`、`viplite.json`、单目深度模型 `yolo26n-depth-320-int8.nb` 和 HIL 双目深度模型 `zipdepth/relative-320-int8.nb`。部署会停止服务，更新 `/opt/firefly` 的程序、配置和模型，再启动服务。[打包文件清单](https://github.com/3SE-Competitive-Robotics-Team/firefly/blob/main/xtask/src/deploy.rs) · [板端模型准备](#板端模型)
 
 ```bash
 container system start
@@ -111,7 +111,13 @@ python scripts/depth_image.py models/yolo26n-depth/yolo26n-depth.ort input.jpg d
 
 图片推理需要 Python、NumPy、OpenCV 和 ONNX Runtime。脚本读取模型输入的固定高宽，支持仓库里的 320 和 768 两种导出，再按官方深度预测器的双线性插值方式将输出恢复到原图尺寸。用同图对照 PyTorch 输出可验证导出和预后处理。现场距离精度需用相机拍摄的画面和对应距离真值评估。
 
-### 飞行链路的 320 深度模型
+### HIL 的 ZipDepth 双目深度
+
+将 A733 VIPLite 模型放入 `models/zipdepth/relative-320-int8.nb`。当前部署产物 SHA-256 为 `27258bda43f37516e97037fc5241d7264fe2b987ef8de6863fb0b2010d09f190`。源权重为 [ZipDepth 的 zipdepth_base_npu.pth](https://github.com/fabiotosi92/ZipDepth/tree/91f3fd21e131641f51e8d35736d1958350180e3a/checkpoints)。NBG 输入为 320×240 左右目依次存放的两个原始 UINT8 平面，图中取左目预测，输出一个同尺寸 FP32 相对视差平面。板端运行时使用 Debian trixie 的 OpenCV core、imgproc 和 video 库。
+
+HIL 清单使用 `depth --zipdepth`。左右目的 sensor ID 和采集时刻必须匹配已校正的 HIL 相机组。VIO 接收 30 Hz 双目图像，深度进程按采集时间从中选取 15 Hz 同步帧对，再提交 NPU 推理。NPU 执行时，CPU 3 从双向光流和水平极线匹配中提取锚点。全图拟合后沿左图边缘平滑局部视差残差，按 HIL 相机的焦距和基线换算成轴向米数。有效锚点不足时发布零深度，仍使用该帧采集时钟。运行 `cargo x deploy-hil`，再运行 `cargo x hil configs/mission-square.toml`。
+
+### 单目飞行链路的 320 深度模型
 
 `depth` 订阅最新一张 320×240 左目灰度图，全视场缩放至 320×320，按 RGB 三通道输入。SIL 的 `depth --simulation` 加载 `models/yolo26n-depth/yolo26n-depth-320.onnx`。按上节从同一权重导出，使用 `imgsz=320`。板端加载同目录的 `yolo26n-depth-320-int8.nb`，输入为有符号 INT8，输出为 80×80 FP16 米制深度。部署包随程序安装该 NBG。两个后端按端点对齐插值恢复为 320×240，并保留原图的采集时间戳。仅离线数据集导出使用渲染几何标签。
 

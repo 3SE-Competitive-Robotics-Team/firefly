@@ -19,6 +19,7 @@ firefly-archive = { path = "crates/firefly-archive" }
 firefly-mission = { path = "crates/firefly-mission" }
 firefly-landing = { path = "crates/firefly-landing" }
 firefly-viplite = { path = "crates/firefly-viplite" }
+firefly-stereo-depth = { path = "crates/firefly-stereo-depth" }
 re_build_info = "=0.43.2"
 re_byte_size = "=0.43.2"
 re_chunk = "=0.43.2"

@@ -1,6 +1,6 @@
 """RMUC 物理主循环：接收飞控电机推力，发布 IMU、仿真位姿与机体描述。
 
-相机图像由 render 发布，深度由左目 YOLO 推理生成。无新鲜飞控指令时暂停物理与传感器时间。
+相机图像由 render 发布，米制深度由 depth 进程生成。无新鲜飞控指令时暂停物理与传感器时间。
 """
 
 from __future__ import annotations
@@ -228,7 +228,7 @@ def main(argv: Sequence[str] | None = None, *, env_factory: EnvironmentFactory =
             1 / physics_period,
         )
     )
-    log("RMUC 相机图像由 render 发布，深度由左目 YOLO 推理生成")
+    log("RMUC 相机图像由 render 发布，米制深度由 depth 进程生成")
 
     # 仅输出 error 及以上级别的 iceoryx2 日志；消息消费由订阅端轮询驱动。
     iox2.set_log_level(iox2.LogLevel.Error)

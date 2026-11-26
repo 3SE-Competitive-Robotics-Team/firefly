@@ -3028,6 +3028,7 @@ dependencies = [
  "firefly-error",
  "firefly-observability",
  "firefly-pubsub",
+ "firefly-stereo-depth",
  "firefly-viplite",
  "iceoryx2-bb-posix",
  "log",
@@ -3818,6 +3819,15 @@ dependencies = [
  "firefly-error",
  "firefly-map",
  "nalgebra",
+]
+
+[[package]]
+name = "firefly-stereo-depth"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "firefly-error",
+ "firefly-viplite",
 ]
 
 [[package]]

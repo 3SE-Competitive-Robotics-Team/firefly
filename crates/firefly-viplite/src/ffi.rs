@@ -188,6 +188,8 @@ pub struct Vip {
         output: vip_buffer,
     ) -> vip_status_e,
     pub vip_run_network: unsafe extern "C" fn(network: vip_network) -> vip_status_e,
+    pub vip_trigger_network: unsafe extern "C" fn(network: vip_network) -> vip_status_e,
+    pub vip_wait_network: unsafe extern "C" fn(network: vip_network) -> vip_status_e,
     pub vip_finish_network: unsafe extern "C" fn(network: vip_network) -> vip_status_e,
 }
 impl Vip {
@@ -220,6 +222,8 @@ impl Vip {
         let vip_set_input = __library.get(b"vip_set_input\0").map(|sym| *sym)?;
         let vip_set_output = __library.get(b"vip_set_output\0").map(|sym| *sym)?;
         let vip_run_network = __library.get(b"vip_run_network\0").map(|sym| *sym)?;
+        let vip_trigger_network = __library.get(b"vip_trigger_network\0").map(|sym| *sym)?;
+        let vip_wait_network = __library.get(b"vip_wait_network\0").map(|sym| *sym)?;
         let vip_finish_network = __library.get(b"vip_finish_network\0").map(|sym| *sym)?;
         Ok(Vip {
             __library,
@@ -240,6 +244,8 @@ impl Vip {
             vip_set_input,
             vip_set_output,
             vip_run_network,
+            vip_trigger_network,
+            vip_wait_network,
             vip_finish_network,
         })
     }

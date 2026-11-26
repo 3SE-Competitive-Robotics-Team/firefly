@@ -172,6 +172,31 @@ mod tests {
     }
 
     #[test]
+    fn depth_rows_reach_the_subscriber_in_image_order() {
+        use crate::{node::create_node, subscriber::Subscriber};
+        let node = create_node().unwrap();
+        let topic = format!("Firefly/Test/DepthRows/{}", std::process::id());
+        let subscriber = Subscriber::<DepthImageMessage>::with_topic(&node, &topic).unwrap();
+        let publisher = DepthImagePublisher::open(&node, &topic, None).unwrap();
+        publisher
+            .publish_rows(3., 0, |y| {
+                std::array::from_fn(|x| (y * IMAGE_WIDTH + x) as f32)
+            })
+            .unwrap();
+        let sample = subscriber.receive().unwrap().unwrap();
+        assert_eq!(
+            (
+                sample.timestamp,
+                sample.sensor_id,
+                sample.width,
+                sample.height
+            ),
+            (3., 0, IMAGE_WIDTH as u32, IMAGE_HEIGHT as u32)
+        );
+        assert!(sample.data.iter().enumerate().all(|(i, v)| *v == i as f32));
+    }
+
+    #[test]
     fn down_image_has_cif_layout_and_independent_sensor_identity() {
         let message = DownImageMessage::default();
         assert_eq!(std::mem::size_of::<DownImageMessage>(), 101_400);

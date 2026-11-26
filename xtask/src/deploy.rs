@@ -28,6 +28,7 @@ const BOARD_MODELS: &[&str] = &[
     "h-marker-yolo26n-cif-v1/viplite.json",
     "h-marker-yolo26n-cif-v1/h-marker.nb",
     "yolo26n-depth/yolo26n-depth-320-int8.nb",
+    "zipdepth/relative-320-int8.nb",
 ];
 
 pub fn run(device: &str) -> Result<()> {
@@ -131,6 +132,11 @@ fn package(root: &Path) -> Result<PathBuf> {
         });
     }
 
+    entries.push(Entry {
+        path: "models/zipdepth/LICENSE".into(),
+        mode: 0o644,
+        source: root.join("docs/licenses/apps/zipdepth/LICENSE"),
+    });
     let package = root.join(PACKAGE);
     if let Some(parent) = package.parent() {
         fs::create_dir_all(parent).at_path("create", parent)?;
@@ -355,6 +361,7 @@ mod tests {
         let scratch = tempfile::tempdir_in(target).unwrap();
         let root = scratch.path();
         std::os::unix::fs::symlink(workspace.join("configs"), root.join("configs")).unwrap();
+        std::os::unix::fs::symlink(workspace.join("docs"), root.join("docs")).unwrap();
         let release = Target::Board.release_dir(root);
         fs::create_dir_all(&release).unwrap();
         for app in Target::Board.apps() {
@@ -368,6 +375,10 @@ mod tests {
         let installed = root.join("installed");
         archive::unpack(&package(root).unwrap(), &installed).unwrap();
         assert!(installed.join("bin/hil-gadget").is_file());
+        assert_eq!(
+            fs::read(installed.join("models/zipdepth/LICENSE")).unwrap(),
+            fs::read(workspace.join("docs/licenses/apps/zipdepth/LICENSE")).unwrap()
+        );
         let unit = "configs/firefly-usb-watchdog.service";
         assert_eq!(
             fs::read(installed.join(unit)).unwrap(),
