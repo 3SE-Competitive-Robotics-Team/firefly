@@ -26,16 +26,25 @@ pub struct Entry {
 
 /// 写出部署包并返回文件大小（字节）。
 pub fn write(package: &Path, entries: &[Entry]) -> io::Result<u64> {
-    let file = File::create(package)?;
-    let mut encoder = zstd::stream::write::Encoder::new(BufWriter::new(file), ZSTD_LEVEL)?;
-    encoder.write_all(MAGIC)?;
-    let count = u32::try_from(entries.len()).map_err(|_| invalid("too many entries"))?;
-    encoder.write_all(&count.to_le_bytes())?;
-
+    let count = u32::try_from(entries.len())
+        .ok()
+        .filter(|count| *count <= MAX_ENTRIES)
+        .ok_or_else(|| invalid("package has too many entries"))?;
     for entry in entries {
+        if entry.path.len() > MAX_PATH_BYTES {
+            return Err(invalid("entry path too long"));
+        }
         if !safe_path(&entry.path) {
             return Err(invalid(format!("unsafe entry path: {}", entry.path)));
         }
+    }
+
+    let file = File::create(package)?;
+    let mut encoder = zstd::stream::write::Encoder::new(BufWriter::new(file), ZSTD_LEVEL)?;
+    encoder.write_all(MAGIC)?;
+    encoder.write_all(&count.to_le_bytes())?;
+
+    for entry in entries {
         let path = entry.path.as_bytes();
         let length = u16::try_from(path.len()).map_err(|_| invalid("entry path too long"))?;
         encoder.write_all(&length.to_le_bytes())?;
@@ -192,6 +201,45 @@ mod tests {
             assert_eq!(permissions.mode() & 0o777, entry.mode, "{}", entry.path);
         }
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn writer_accepts_format_limits_and_preserves_the_package_on_overflow() {
+        let dir = tempfile::tempdir_in(crate::target::workspace_root().join("target")).unwrap();
+        let source = dir.path().join("empty");
+        File::create(&source).unwrap();
+        let package = dir.path().join("package.zst");
+        let mut entries: Vec<_> = (0..MAX_ENTRIES)
+            .map(|i| Entry {
+                path: format!("configs/{i}.toml"),
+                mode: 0o644,
+                source: source.clone(),
+            })
+            .collect();
+        let longest_path = "库/".repeat(MAX_PATH_BYTES / 4 - 1) + "a.nb";
+        assert_eq!(longest_path.len(), MAX_PATH_BYTES);
+        entries[0].path = longest_path;
+        write(&package, &entries).unwrap();
+        let original = fs::read(&package).unwrap();
+
+        entries.push(Entry {
+            path: "extra".into(),
+            mode: 0o644,
+            source,
+        });
+        assert_eq!(
+            write(&package, &entries).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(fs::read(&package).unwrap(), original);
+
+        entries.pop();
+        entries[0].path.push('x');
+        assert_eq!(
+            write(&package, &entries).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(fs::read(&package).unwrap(), original);
     }
 
     #[test]
