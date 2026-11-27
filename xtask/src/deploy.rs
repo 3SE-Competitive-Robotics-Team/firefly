@@ -159,7 +159,10 @@ fn push(device: &str, package: &Path) -> Result<()> {
     remote_step(device, &format!("chmod 755 {REMOTE_UNPACKER}"))?;
 
     prepare_destination_with(|args| adb_output(device, args))?;
-    unpack_with(|args| adb_output(device, args))?;
+    remote_step(
+        device,
+        &format!("{REMOTE_UNPACKER} unpack {REMOTE_PACKAGE} {DESTINATION}"),
+    )?;
     check_unpacked(device)?;
     remote_step(device, "sync")?;
     link(device)?;
@@ -198,20 +201,6 @@ fn remote_step_with(
 
 fn has_marker(output: &str, marker: &str) -> bool {
     output.lines().any(|line| line.trim() == marker)
-}
-
-fn unpack_with(mut output: impl FnMut(&[&str]) -> Result<String>) -> Result<()> {
-    const COMPLETE: &str = "FIREFLY_UNPACK_COMPLETE";
-    let command =
-        format!("{REMOTE_UNPACKER} unpack {REMOTE_PACKAGE} {DESTINATION} && echo {COMPLETE}");
-    let result = output(&["shell", &command])?;
-    if !has_marker(&result, COMPLETE) {
-        return Err(Error::new(
-            ErrorKind::Unavailable,
-            format!("远端解包未完成：\n{result}"),
-        ));
-    }
-    Ok(())
 }
 
 /// 检查机载清单中的每个程序在部署路径上都有执行权限。
@@ -447,15 +436,12 @@ mod tests {
     }
 
     #[test]
-    fn unpack_requires_completion_marker_and_reports_remote_output() {
+    fn remote_step_reports_output_when_the_completion_marker_is_missing() {
         let diagnostic = "configs/fc.toml: permission denied";
-        let error = unpack_with(|args| {
-            assert_eq!(args[0], "shell");
-            assert!(args[1].contains(" && echo FIREFLY_UNPACK_COMPLETE"));
-            Ok(format!("bin/fc\n{diagnostic}\n"))
+        let error = remote_step_with("unpack", |_| {
+            Ok(format!("echo FIREFLY_STEP_COMPLETE\n{diagnostic}\n"))
         })
         .unwrap_err();
         assert!(error.message().contains(diagnostic), "{error}");
-        assert!(unpack_with(|_| Ok("unpacked\nFIREFLY_UNPACK_COMPLETE\n".into())).is_ok());
     }
 }
